@@ -296,7 +296,7 @@ button {
 }
 .summary-title h1 {
   font:
-    700 clamp(23px, 3vw, 34px)/1.15 ui-sans-serif,
+    700 clamp(23px, 3vw, 34px) / 1.15 ui-sans-serif,
     sans-serif;
   letter-spacing: -0.035em;
   margin: 0 0 8px;
@@ -422,6 +422,84 @@ button {
 .match-count {
   margin-left: auto;
 }
+.search-results {
+  margin: 0 0 18px;
+  padding: 16px;
+  border: 1px solid #cfe3dd;
+  border-radius: 10px;
+  background: #eef7f3;
+}
+.search-results-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 20px;
+  margin-bottom: 12px;
+}
+.search-results-head .eyebrow {
+  display: block;
+  margin-bottom: 2px;
+}
+.search-results-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.search-results-head p,
+.search-results-empty,
+.search-results-limit {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.search-result-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 420px;
+  overflow: auto;
+}
+.search-result {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid #dce8e3;
+  border-radius: 7px;
+  background: var(--paper);
+}
+.search-result-copy {
+  flex: 1;
+  min-width: 0;
+}
+.search-result-copy strong {
+  display: block;
+  margin: 2px 0;
+  overflow-wrap: anywhere;
+}
+.search-result-copy p {
+  margin: 0;
+  color: #526365;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.search-result-meta {
+  display: flex;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.goto-result {
+  flex: 0 0 auto;
+  background: var(--paper);
+  border-color: #bad7cf;
+  color: #176c66;
+}
+.search-results-limit {
+  margin-top: 10px;
+}
 .timeline {
   display: grid;
   gap: 11px;
@@ -451,6 +529,13 @@ button {
 }
 .event.error {
   border-left-color: var(--red);
+}
+.event.search-target {
+  border-color: var(--teal);
+  border-left-color: var(--teal);
+  box-shadow:
+    0 0 0 3px #158b8324,
+    var(--shadow);
 }
 .event-head {
   display: flex;
@@ -933,6 +1018,14 @@ select:focus-visible,
   }
   .frontmatter {
     grid-template-columns: 1fr;
+  }
+  .search-results-head,
+  .search-result {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .goto-result {
+    align-self: flex-start;
   }
 }
 @media (prefers-reduced-motion: reduce) {

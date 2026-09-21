@@ -174,6 +174,7 @@
     } else {
       [
         "timeline",
+        "search-results",
         "memory-list",
         "prompt-jump",
         "session-tags",
@@ -296,25 +297,80 @@
         (!state.filters.errors ||
           e.isError ||
           (e.tool && e.tool.status === "error")) &&
-        (!q ||
-          [
-            e.title,
-            e.text,
-            e.kind,
-            e.model,
-            e.agentId,
-            e.parentUuid,
-            e.tool && e.tool.name,
-            e.tool && e.tool.input,
-            e.tool && e.tool.result,
-            e.tool && e.tool.command,
-            e.tool && e.tool.resultRaw,
-          ]
-            .map(text)
-            .join("\n")
-            .toLowerCase()
-            .includes(q)),
+        (!q || eventSearchText(e).toLowerCase().includes(q)),
     );
+  }
+  function eventSearchText(e) {
+    return [
+      e.title,
+      e.text,
+      e.kind,
+      e.model,
+      e.agentId,
+      e.parentUuid,
+      e.tool && e.tool.name,
+      e.tool && e.tool.input,
+      e.tool && e.tool.result,
+      e.tool && e.tool.command,
+      e.tool && e.tool.resultRaw,
+    ]
+      .map(text)
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  function searchResultPreview(e, query) {
+    const value = eventSearchText(e) || "No text preview recorded.",
+      at = value.toLowerCase().indexOf(query.toLowerCase()),
+      start = Math.max(0, at < 0 ? 0 : at - 75),
+      end = Math.min(value.length, start + 190);
+    return `${start ? "…" : ""}${value.slice(start, end)}${end < value.length ? "…" : ""}`;
+  }
+  function focusTimelineEvent(id) {
+    const s = session(),
+      target = s && (s.events || []).find((e) => String(e.id) === String(id));
+    if (!target) return;
+    resetFilters(false);
+    if (target.kind === "system") {
+      state.filters.kinds.add("system");
+      const systemToggle = document.querySelector('[data-kind="system"]');
+      if (systemToggle) systemToggle.checked = true;
+    }
+    tab("timeline");
+    const events = filtered(),
+      index = events.findIndex((e) => String(e.id) === String(id));
+    state.page = index < 0 ? 0 : Math.floor(index / state.pageSize);
+    renderTimeline();
+    requestAnimationFrame(() => {
+      const node = Array.from(
+        document.querySelectorAll("[data-event-id]"),
+      ).find((item) => item.dataset.eventId === String(id));
+      if (!node) return;
+      node.classList.add("search-target");
+      node.tabIndex = -1;
+      node.focus({ preventScroll: true });
+      node.scrollIntoView({ behavior: "smooth", block: "center" });
+      announce(
+        "Opened the result in the full timeline with surrounding events.",
+      );
+    });
+  }
+  function renderSearchResults(events) {
+    const container = $("search-results"),
+      query = state.filters.query.trim();
+    if (!query) {
+      container.hidden = true;
+      container.replaceChildren();
+      return;
+    }
+    const limit = 100,
+      shown = events.slice(0, limit);
+    container.hidden = false;
+    container.innerHTML = `<div class="search-results-head"><div><span class="eyebrow">SEARCH RESULTS</span><h2>${num(events.length)} match${events.length === 1 ? "" : "es"}</h2></div><p>Open a result in the normal timeline to read the events around it.</p></div>${shown.length ? `<ol class="search-result-list">${shown.map((e) => `<li class="search-result"><div class="search-result-copy"><div class="search-result-meta"><span class="kind-pill">${esc(e.kind)}</span><span>${esc(e.agentId || "main")} · ${esc(date(e.timestamp))}</span></div><strong>${esc(e.title || (e.tool && e.tool.name) || e.kind)}</strong><p>${esc(searchResultPreview(e, query))}</p></div><button type="button" class="button small goto-result" data-result-id="${esc(e.id)}" aria-label="Go to ${esc(e.title || e.kind)} in the normal timeline">Go to result →</button></li>`).join("")}</ol>` : '<p class="search-results-empty">No events match this search and the selected filters.</p>'}${events.length > limit ? `<p class="search-results-limit">Showing the first ${limit} results. Refine the search to narrow the list.</p>` : ""}`;
+    container.querySelectorAll("[data-result-id]").forEach((button) => {
+      button.onclick = () => focusTimelineEvent(button.dataset.resultId);
+    });
   }
   function eventHTML(e) {
     const t = e.tool,
@@ -353,6 +409,8 @@
       $("timeline").innerHTML =
         '<div class="memory-card"><h3>No session selected</h3><p>Open Memory to browse imported memories.</p></div>';
       $("prompt-jump").hidden = true;
+      $("search-results").hidden = true;
+      $("search-results").replaceChildren();
       $("match-count").textContent = "0 matches";
       $("page-label").textContent = "Page 1 of 1";
       $("prev-page").disabled = true;
@@ -404,6 +462,7 @@
     $("next-page").disabled = state.page >= pages - 1;
     $("match-count").textContent =
       `${ev.length} match${ev.length === 1 ? "" : "es"}`;
+    renderSearchResults(ev);
     const prompts = (s.events || []).filter((e) => e.kind === "prompt");
     $("prompt-jump").hidden = !prompts.length;
     $("prompt-jump").innerHTML = prompts.length
@@ -412,24 +471,7 @@
     const ps = $("prompt-select");
     if (ps)
       ps.onchange = () => {
-        const id = ps.value;
-        if (!id) return;
-        resetFilters(false);
-        tab("timeline");
-        const all = filtered(),
-          i = all.findIndex((e) => String(e.id) === id);
-        state.page = i < 0 ? 0 : Math.floor(i / state.pageSize);
-        renderTimeline();
-        requestAnimationFrame(() => {
-          const n = Array.from(
-            document.querySelectorAll("[data-event-id]"),
-          ).find((x) => x.dataset.eventId === id);
-          if (n) {
-            n.scrollIntoView({ behavior: "smooth", block: "center" });
-            n.tabIndex = -1;
-            n.focus({ preventScroll: true });
-          }
-        });
+        if (ps.value) focusTimelineEvent(ps.value);
       };
   }
   function renderMemory() {

@@ -6,7 +6,7 @@ A standalone, offline viewer for Claude Code session JSONL files. Open `index.ht
 
 1. Open `index.html` and choose files, drag in logs, or select a project folder. Folder import includes nested subagent logs and Markdown memory files. Use **Demo** to try fictional data first.
 2. Select a session. Browse prompts, assistant replies, recorded thinking, tool calls with their results, and system events. Expand a card to inspect its full content and source record.
-3. Search and filter the timeline by event type, tool, agent, or errors. Jump between prompts to follow the work. Export the filtered events for further analysis.
+3. Search and filter the timeline by event type, tool, agent, or errors. Search results include **Go to result**, which restores the normal timeline on the correct page and focuses the matching event so you can read the surrounding context. Jump between prompts to follow the work. Export the filtered events for further analysis.
 4. Open the memory view to read imported Markdown documents and follow explicit origin-session links.
 
 Select the folder containing your Claude session logs as the import folder. The viewer imports data only when you select it; it does not automatically scan your disk. Importing an individual JSONL file cannot also read neighboring memory or subagent files: select those files too, or import their parent folder.
