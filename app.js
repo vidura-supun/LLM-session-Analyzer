@@ -37,6 +37,21 @@
     const pad = (value) => String(value).padStart(2, "0");
     return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} UTC`;
   };
+  function platformLabel(s) {
+    if (!s) return "";
+    if (s.platform) return String(s.platform);
+    const evidence = [
+      ...(s.sources || []),
+      ...(s.models || []),
+    ]
+      .join(" ")
+      .toLowerCase();
+    if (evidence.includes(".codex") || /\b(?:gpt|o[134])-/.test(evidence))
+      return "Codex";
+    if (evidence.includes(".claude") || evidence.includes("claude"))
+      return "Claude Code";
+    return "";
+  }
   function announce(s) {
     let e = $("status-live");
     if (!e) {
@@ -85,9 +100,30 @@
   }
   async function parseFile(file) {
     const source = file.webkitRelativePath || file.name,
-      n = file.name.toLowerCase();
+      n = file.name.toLowerCase(),
+      sourceParts = source.replace(/\\/g, "/").split("/"),
+      codexAt = sourceParts.findIndex(
+        (part) => part.toLowerCase() === ".codex",
+      );
     if (/\.meta\.json$/i.test(n) || (!/\.jsonl$/i.test(n) && !/\.md$/i.test(n)))
       return { skipped: true, source };
+    if (/\.jsonl$/i.test(n) && codexAt >= 0) {
+      const belowCodex = sourceParts.slice(codexAt + 1),
+        supportedCodexLog =
+          (belowCodex[0] || "").toLowerCase() === "sessions" ||
+          (belowCodex.length === 1 &&
+            (n === "history.jsonl" || n === "session_index.jsonl"));
+      if (!supportedCodexLog) return { skipped: true, source };
+    }
+    if (/\.md$/i.test(n) && file.webkitRelativePath) {
+      const directories = file.webkitRelativePath
+        .replace(/\\/g, "/")
+        .split("/")
+        .slice(0, -1)
+        .map((part) => part.toLowerCase());
+      if (!directories.some((part) => part === "memory" || part === "memories"))
+        return { skipped: true, source };
+    }
     const raw = await file.text(),
       p = window.SessionParser;
     if (!p) throw Error("parser.js did not load");
@@ -192,7 +228,7 @@
     const all = (state.workspace && state.workspace.sessions) || [],
       q = ($("session-search").value || "").toLowerCase(),
       ss = all.filter((s) =>
-        [s.title, s.id, s.cwd, s.branch]
+        [s.title, s.id, s.cwd, s.branch, platformLabel(s)]
           .filter(Boolean)
           .join(" ")
           .toLowerCase()
@@ -204,8 +240,11 @@
     $("session-list").innerHTML = ss.length
       ? ss
           .map(
-            (s) =>
-              `<button class="session-item ${s.id === state.activeId ? "active" : ""}" data-session-id="${esc(s.id)}"><strong>${esc(s.title || "Untitled session")}</strong><small>${esc(s.branch || s.cwd || "Recorded events")} · ${num((s.events || []).length)} events</small></button>`,
+            (s) => {
+              const platform = platformLabel(s),
+                context = s.branch || s.cwd || "Recorded events";
+              return `<button class="session-item ${s.id === state.activeId ? "active" : ""}" data-session-id="${esc(s.id)}"><strong>${esc(s.title || "Untitled session")}</strong><small>${platform ? `${esc(platform)} · ` : ""}${esc(context)} · ${num((s.events || []).length)} events</small></button>`;
+            },
           )
           .join("")
       : `<div class="sidebar-empty">${all.length ? "No matching sessions." : "No session logs loaded"}</div>`;
@@ -250,6 +289,7 @@
         : "No usable session records were found. Open Warnings for file and line details.";
     const tags = s
       ? [
+          ...(platformLabel(s) ? [`Platform: ${platformLabel(s)}`] : []),
           ...(s.models || []).map((m) => `Model: ${m}`),
           `${(s.agents || []).length || 1} agent${(s.agents || []).length === 1 ? "" : "s"}`,
           `${(s.sources || []).length} source${(s.sources || []).length === 1 ? "" : "s"}`,
@@ -613,6 +653,7 @@
       title = current ? current.title || current.id : "Memory workspace",
       metadata = current
         ? [
+            platformLabel(current),
             current.id,
             current.cwd,
             current.branch,

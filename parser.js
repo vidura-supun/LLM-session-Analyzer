@@ -243,6 +243,68 @@
         ? "answered"
         : "unanswered";
   }
+  function codexPayload(raw) {
+    return object(raw) && object(raw.payload) ? raw.payload : {};
+  }
+  function codexText(value) {
+    if (value == null) return "";
+    if (typeof value === "string") return value;
+    if (Array.isArray(value))
+      return value
+        .map(function (part) {
+          if (typeof part === "string") return part;
+          if (!object(part)) return string(part);
+          if (part.text !== undefined) return string(part.text);
+          if (part.content !== undefined) return codexText(part.content);
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n");
+    if (object(value)) {
+      if (value.text !== undefined) return string(value.text);
+      if (value.content !== undefined) return codexText(value.content);
+    }
+    return string(value);
+  }
+  function codexJsonArgument(value) {
+    if (typeof value !== "string") return object(value) ? value : {};
+    try {
+      var parsed = JSON.parse(value);
+      return object(parsed) ? parsed : { value: parsed };
+    } catch (_) {
+      return { value: value };
+    }
+  }
+  function codexToolStatus(status, isError) {
+    var s = String(status || "").toLowerCase();
+    if (isError || /fail|error|cancel|reject/.test(s)) return "error";
+    if (/pending|running|in.progress|started/.test(s)) return "pending";
+    return "success";
+  }
+  function codexTimestamp(value) {
+    var n = number(value);
+    if (!n) return null;
+    if (Math.abs(n) < 1e12) n *= 1000;
+    var d = new Date(n);
+    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+  }
+  function codexDurationMs(value) {
+    if (typeof value === "number") return number(value) || null;
+    if (!object(value)) return null;
+    if (value.milliseconds != null) return number(value.milliseconds) || null;
+    var milliseconds = number(value.secs) * 1000 + number(value.nanos) / 1e6;
+    return milliseconds || null;
+  }
+  function codexAgentIdentity(meta) {
+    if (!object(meta)) return "main";
+    if (!meta.parent_thread_id && meta.id === meta.session_id) return "main";
+    return String(
+      meta.agent_nickname ||
+        (meta.agent_path ? basename(meta.agent_path) : "") ||
+        meta.id ||
+        "agent",
+    );
+  }
   function buildWorkspace(parsedFiles, memories) {
     parsedFiles = Array.isArray(parsedFiles) ? parsedFiles : [];
     memories = Array.isArray(memories) ? memories : [];
@@ -250,12 +312,16 @@
       sessions = new Map(),
       seq = 0,
       pendingResults = [],
-      toolCalls = new Map();
+      toolCalls = new Map(),
+      codexUsages = new Map(),
+      historyRows = [],
+      indexRows = [];
     function session(id) {
       if (!sessions.has(id))
         sessions.set(id, {
           id: id,
           title: "",
+          platform: "",
           cwd: "",
           branch: "",
           models: [],
@@ -277,6 +343,37 @@
         warnings.push.apply(warnings, pf.warnings);
       var source = String(pf.source || "import.jsonl"),
         sourceAgent = inferredAgent(source);
+      var sourceBase = basename(source).toLowerCase(),
+        isHistory = sourceBase === "history.jsonl",
+        isIndex = sourceBase === "session_index.jsonl",
+        codexMeta = null,
+        isCodex = false;
+      pf.records.forEach(function (entry) {
+        var raw = entry && entry.raw;
+        if (!object(raw)) return;
+        if (
+          raw.type === "session_meta" ||
+          raw.type === "event_msg" ||
+          raw.type === "response_item" ||
+          raw.type === "turn_context" ||
+          raw.type === "token_usage_record" ||
+          raw.type === "compacted"
+        )
+          isCodex = true;
+        if (raw.type === "session_meta" && object(raw.payload) && !codexMeta)
+          codexMeta = raw.payload;
+      });
+      if (isHistory || isIndex) {
+        pf.records.forEach(function (entry) {
+          if (!object(entry.raw)) return;
+          (isHistory ? historyRows : indexRows).push({
+            raw: entry.raw,
+            source: source,
+            line: entry.line,
+          });
+        });
+        return;
+      }
       var sourceSession = "",
         sourceHasAgentName = /^agent-[^.]+\.jsonl$/i.test(basename(source)),
         sawConversation = false;
@@ -285,6 +382,13 @@
         if (!object(srr)) continue;
         if (!sourceSession && (srr.sessionId || srr.session_id))
           sourceSession = String(srr.sessionId || srr.session_id);
+        if (
+          !sourceSession &&
+          srr.type === "session_meta" &&
+          object(srr.payload) &&
+          (srr.payload.session_id || srr.payload.id)
+        )
+          sourceSession = String(srr.payload.session_id || srr.payload.id);
         if (
           sourceHasAgentName &&
           !sawConversation &&
@@ -303,6 +407,413 @@
             sourceAgent = String(srr.agentId || srr.agent_id);
         }
       }
+      if (isCodex) {
+        if (codexMeta) {
+          sourceSession = String(
+            codexMeta.session_id || codexMeta.id || sourceSession || "",
+          );
+          sourceAgent = codexAgentIdentity(codexMeta);
+        }
+        if (!sourceSession) sourceSession = fileSession(source);
+        if (!sourceAgent) sourceAgent = "main";
+        var codexSession = session(sourceSession),
+          codexAgent = sourceAgent,
+          codexModel = "",
+          codexCwd = (codexMeta && codexMeta.cwd) || "",
+          canonicalItems = [],
+          functionOutputs = new Map(),
+          spawnCallIds = new Set();
+        codexSession.platform = "Codex";
+        if (codexSession.sources.indexOf(source) < 0)
+          codexSession.sources.push(source);
+        if (codexSession.agents.indexOf(codexAgent) < 0)
+          codexSession.agents.push(codexAgent);
+        if (!codexSession.cwd && codexCwd)
+          codexSession.cwd = String(codexCwd);
+        if (codexMeta && codexMeta.timestamp)
+          codexSession._times.push({
+            value: codexMeta.timestamp,
+            ms: Date.parse(codexMeta.timestamp),
+          });
+        pf.records.forEach(function (entry) {
+          var raw = entry.raw,
+            payload = codexPayload(raw),
+            item = object(payload.item) ? payload.item : null;
+          if (
+            raw.type === "event_msg" &&
+            payload.type === "item_completed" &&
+            item
+          )
+            canonicalItems.push(item);
+          if (
+            raw.type === "response_item" &&
+            payload.type === "function_call_output" &&
+            payload.call_id
+          ) {
+            var outputs = functionOutputs.get(String(payload.call_id)) || [];
+            outputs.push(entry);
+            functionOutputs.set(String(payload.call_id), outputs);
+          }
+          if (
+            raw.type === "response_item" &&
+            payload.type === "function_call" &&
+            payload.name === "spawn_agent" &&
+            payload.call_id
+          )
+            spawnCallIds.add(String(payload.call_id));
+        });
+        pf.records.forEach(function (entry) {
+          var raw = entry.raw,
+            line = entry.line,
+            payload = codexPayload(raw),
+            item = object(payload.item) ? payload.item : null,
+            kind = "system",
+            title = "Codex event",
+            text = "",
+            tool = null,
+            timestamp = raw.timestamp || null,
+            model = codexModel,
+            eventAgent = codexAgent,
+            eventError = false,
+            recognizedSystem = false;
+          if (!object(raw)) return;
+          if (raw.type === "session_meta") {
+            var meta = codexPayload(raw);
+            if (meta.cwd && !codexSession.cwd)
+              codexSession.cwd = String(meta.cwd);
+            if (meta.timestamp && Number.isFinite(Date.parse(meta.timestamp)))
+              codexSession._times.push({
+                value: meta.timestamp,
+                ms: Date.parse(meta.timestamp),
+              });
+            title = "Codex session metadata";
+            text = [
+              meta.originator && "Origin: " + meta.originator,
+              meta.cli_version && "CLI: " + meta.cli_version,
+              meta.thread_source && "Thread: " + meta.thread_source,
+            ]
+              .filter(Boolean)
+              .join("\n");
+            recognizedSystem = true;
+          }
+          if (raw.type === "turn_context") {
+            var context = codexPayload(raw);
+            if (context.model) {
+              codexModel = String(context.model);
+              if (codexSession.models.indexOf(codexModel) < 0)
+                codexSession.models.push(codexModel);
+              model = codexModel;
+            }
+            if (context.cwd) {
+              codexCwd = String(context.cwd);
+              if (!codexSession.cwd) codexSession.cwd = codexCwd;
+            }
+            title = "Turn context";
+            text = [
+              context.turn_id && "Turn: " + context.turn_id,
+              context.model && "Model: " + context.model,
+              context.effort && "Reasoning effort: " + context.effort,
+              context.approval_policy &&
+                "Approval policy: " + context.approval_policy,
+            ]
+              .filter(Boolean)
+              .join("\n");
+            recognizedSystem = true;
+          }
+          if (!recognizedSystem && raw.type === "token_usage_record") {
+            var tokenPayload = codexPayload(raw),
+              tokenValues = object(tokenPayload.thread_token_usage)
+                ? tokenPayload.thread_token_usage
+                : object(tokenPayload.turn_token_usage)
+                  ? tokenPayload.turn_token_usage
+                  : object(tokenPayload.usage)
+                    ? tokenPayload.usage
+                    : null;
+            if (tokenValues) {
+              var usageKey =
+                  sourceSession + "\u0000" +
+                  String(tokenPayload.thread_id || codexAgent) + "\u0000" +
+                  (object(tokenPayload.thread_token_usage)
+                    ? "thread"
+                    : String(tokenPayload.turn_id || tokenPayload.response_id || line)),
+                usage = codexUsages.get(usageKey) || {};
+              [
+                "input_tokens",
+                "cached_input_tokens",
+                "cache_write_input_tokens",
+                "output_tokens",
+              ].forEach(function (field) {
+                usage[field] = Math.max(
+                  number(usage[field]),
+                  number(tokenValues[field]),
+                );
+              });
+              codexUsages.set(usageKey, usage);
+            }
+            return;
+          }
+          if (recognizedSystem) {
+            /* Session and turn metadata stay inspectable as hidden system events. */
+          } else if (
+            raw.type === "response_item" &&
+            payload.type === "function_call_output"
+          ) {
+            return;
+          } else if (
+            raw.type === "response_item" &&
+            payload.type === "function_call"
+          ) {
+            var args = codexJsonArgument(payload.arguments),
+              callId = String(payload.call_id || payload.id || ""),
+              outputEntry = (functionOutputs.get(callId) || []).shift(),
+              outputRaw = outputEntry && outputEntry.raw,
+              outputPayload = codexPayload(outputRaw),
+              outputText = outputRaw ? codexText(outputPayload.output) : "",
+              toolName = String(payload.name || "Function call");
+            kind = "tool";
+            title = toolName;
+            text = "";
+            tool = {
+              id: callId,
+              name: toolName,
+              input: args,
+              command: string(args.command || args.cmd || args.question || ""),
+              status: outputRaw ? "success" : "pending",
+              result: outputText,
+              resultSource: outputEntry ? source : null,
+              resultLine: outputEntry ? outputEntry.line : null,
+              resultRaw: outputRaw || null,
+              durationMs: null,
+              questionInteraction:
+                /request_user_input/i.test(toolName)
+                  ? questionInteraction(args)
+                  : null,
+            };
+            if (tool.questionInteraction) title = "Questions for user";
+            if (outputRaw && tool.questionInteraction) {
+              var structuredOutput = null;
+              try {
+                structuredOutput = JSON.parse(outputText);
+              } catch (_) {}
+              if (object(structuredOutput)) {
+                applyQuestionResult(
+                  tool,
+                  { toolUseResult: structuredOutput },
+                  false,
+                );
+              }
+            }
+            if (/spawn_agent/i.test(toolName) && callId)
+              tool._codexSpawnCallId = callId;
+          } else if (raw.type === "response_item" && payload.type === "agent_message") {
+            var responseText = codexText(payload.content),
+              duplicate = canonicalItems.some(function (canonical) {
+                return (
+                  (payload.id && canonical.id === payload.id) ||
+                  (canonical.type === "AgentMessage" &&
+                    codexText(canonical.content) === responseText)
+                );
+              });
+            if (duplicate || !responseText) return;
+            kind = "assistant";
+            eventAgent = String(payload.author || codexAgent);
+            title = payload.recipient
+              ? "Agent message to " + String(payload.recipient)
+              : "Assistant";
+            text = responseText;
+          } else if (raw.type === "event_msg" && item) {
+            var itemType = String(item.type || "");
+            if (itemType === "UserMessage") {
+              kind = "prompt";
+              title = codexAgent === "main" ? "Human prompt" : "Agent prompt";
+              text = codexText(item.content);
+            } else if (itemType === "AgentMessage") {
+              kind = "assistant";
+              title = "Assistant";
+              text = codexText(item.content);
+            } else if (itemType === "Reasoning") {
+              kind = "thinking";
+              title = "Thinking";
+              text =
+                codexText(item.summary_text) ||
+                codexText(item.raw_content) ||
+                "Thinking unavailable (redacted or not recorded).";
+            } else if (itemType === "CommandExecution") {
+              kind = "tool";
+              title = "Command";
+              var command = Array.isArray(item.command)
+                  ? item.command.join(" ")
+                  : string(item.command || ""),
+                commandOutput =
+                  item.aggregated_output ||
+                  [item.stdout, item.stderr].filter(Boolean).join("\n") ||
+                  item.formatted_output ||
+                  "";
+              text = command;
+              tool = {
+                id: String(item.id || ""),
+                name: "Command",
+                input: { command: item.command, cwd: item.cwd || codexCwd },
+                command: command,
+                status: codexToolStatus(
+                  item.status,
+                  number(item.exit_code) !== 0 && item.exit_code != null,
+                ),
+                result: codexText(commandOutput),
+                resultSource: source,
+                resultLine: line,
+                resultRaw: raw,
+                durationMs: codexDurationMs(item.duration),
+                questionInteraction: null,
+              };
+            } else if (itemType === "FileChange") {
+              kind = "tool";
+              title = "File change";
+              var changedPaths = object(item.changes)
+                ? Object.keys(item.changes)
+                : [];
+              text = changedPaths.join("\n");
+              tool = {
+                id: String(item.id || ""),
+                name: "File change",
+                input: item.changes || {},
+                command: changedPaths.join(", "),
+                status: codexToolStatus(item.status, false),
+                result: [item.stdout, item.stderr].filter(Boolean).join("\n"),
+                resultSource: source,
+                resultLine: line,
+                resultRaw: raw,
+                durationMs: null,
+                questionInteraction: null,
+              };
+            } else if (itemType === "McpToolCall") {
+              kind = "tool";
+              var mcpName = [item.server, item.tool].filter(Boolean).join("/");
+              title = mcpName || "MCP tool";
+              text = codexText(item.arguments);
+              tool = {
+                id: String(item.id || ""),
+                name: mcpName || "MCP tool",
+                input: item.arguments || {},
+                command: string(item.arguments || ""),
+                status: codexToolStatus(
+                  item.status,
+                  !!(object(item.result) && item.result.isError),
+                ),
+                result: codexText(item.result),
+                resultSource: source,
+                resultLine: line,
+                resultRaw: raw,
+                durationMs: codexDurationMs(item.duration),
+                questionInteraction: null,
+              };
+            } else if (itemType === "Extension") {
+              kind = "tool";
+              title = String(item.kind || "Extension");
+              text = codexText(item.query || item.action || "");
+              tool = {
+                id: String(item.id || ""),
+                name: title,
+                input: item.query || item.action || {},
+                command: string(item.query || ""),
+                status: codexToolStatus(item.status, !!item.failure),
+                result: codexText(item.results || item.result || item.failure),
+                resultSource: source,
+                resultLine: line,
+                resultRaw: raw,
+                durationMs: null,
+                questionInteraction: null,
+              };
+            } else if (itemType === "ImageView") {
+              kind = "tool";
+              title = "Image view";
+              text = string(item.path || "");
+              tool = {
+                id: String(item.id || ""),
+                name: "Image view",
+                input: { path: item.path || "" },
+                command: String(item.path || ""),
+                status: "success",
+                result: String(item.path || ""),
+                resultSource: source,
+                resultLine: line,
+                resultRaw: raw,
+                durationMs: null,
+                questionInteraction: null,
+              };
+            } else if (itemType === "SubAgentActivity") {
+              if (spawnCallIds.has(String(item.id || ""))) return;
+              kind = "system";
+              title = "Sub-agent " + String(item.kind || "activity");
+              text =
+                String(item.agent_path || "") +
+                (item.agent_thread_id ? " (" + item.agent_thread_id + ")" : "");
+            } else if (itemType === "ContextCompaction") {
+              kind = "system";
+              title = "Context compacted";
+              text = "Context compaction";
+            } else {
+              kind = "system";
+              title = itemType || "Codex item";
+              text = codexText(item);
+            }
+          } else if (raw.type === "compacted") {
+            kind = "system";
+            title = "Context compacted";
+            text = codexText(payload.message) || "Context compacted";
+          } else if (raw.type === "event_msg") {
+            if (payload.type === "token_count") return;
+            title = String(payload.type || "Codex event")
+              .replace(/_/g, " ")
+              .replace(/^./, function (letter) {
+                return letter.toUpperCase();
+              });
+            text =
+              codexText(payload.message || payload.last_agent_message) ||
+              "Codex lifecycle event";
+            eventError = /abort|fail|error/.test(
+              String(payload.type || "").toLowerCase(),
+            );
+          } else if (raw.type === "world_state") {
+            title = "World state";
+            text = "Runtime state snapshot recorded";
+          } else if (raw.type === "inter_agent_communication_metadata") {
+            title = "Agent communication metadata";
+            text = "Inter-agent communication metadata recorded";
+          } else return;
+          var event = {
+            id: source + ":" + line + ":0",
+            kind: kind,
+            title: title,
+            text: text,
+            timestamp: timestamp,
+            sessionId: sourceSession,
+            agentId: eventAgent,
+            source: source,
+            line: line,
+            uuid: (item && item.id) || payload.id || payload.call_id || null,
+            parentUuid: null,
+            model: model || null,
+            isError: !!(
+              eventError ||
+              tool &&
+              (tool.status === "error" ||
+                (item && item.exit_code != null && number(item.exit_code) !== 0))
+            ),
+            raw: raw,
+            _seq: seq++,
+            _file: fileIndex,
+          };
+          if (tool) {
+            if (tool._codexSpawnCallId) delete tool._codexSpawnCallId;
+            event.tool = tool;
+          }
+          if (timestamp && Number.isFinite(Date.parse(timestamp)))
+            codexSession._times.push({ value: timestamp, ms: Date.parse(timestamp) });
+          codexSession.events.push(event);
+        });
+        return;
+      }
       pf.records.forEach(function (entry) {
         var raw = entry.raw,
           line = entry.line;
@@ -315,6 +826,7 @@
         );
         var s = session(sid),
           agent = String(raw.agentId || raw.agent_id || sourceAgent || "main");
+        if (!s.platform) s.platform = "Claude Code";
         if (s.sources.indexOf(source) < 0) s.sources.push(source);
         if (s.agents.indexOf(agent) < 0) s.agents.push(agent);
         if (!s.cwd && raw.cwd) s.cwd = String(raw.cwd);
@@ -421,6 +933,62 @@
         });
       });
     });
+    var codexIndexTitles = new Map();
+    indexRows.forEach(function (entry) {
+      var raw = entry.raw,
+        id = String(raw.id || ""),
+        s = id && sessions.get(id);
+      if (id && raw.thread_name)
+        codexIndexTitles.set(id, String(raw.thread_name));
+      if (!s) return;
+      if (s.sources.indexOf(entry.source) < 0) s.sources.push(entry.source);
+      if (raw.thread_name) s._indexTitle = String(raw.thread_name);
+      if (raw.updated_at && Number.isFinite(Date.parse(raw.updated_at)))
+        s._times.push({ value: raw.updated_at, ms: Date.parse(raw.updated_at) });
+    });
+    historyRows.forEach(function (entry) {
+      var raw = entry.raw,
+        id = String(raw.session_id || ""),
+        s = id && sessions.get(id),
+        text = typeof raw.text === "string" ? raw.text : "";
+      if (!id || !text) return;
+      if (!s) {
+        s = session(id);
+        s.platform = "Codex";
+        s._indexTitle = codexIndexTitles.get(id) || "";
+      }
+      var alreadyPresent = s.events.some(function (event) {
+        return event.kind === "prompt" && event.text === text;
+      });
+      if (alreadyPresent) return;
+      var timestamp = codexTimestamp(raw.ts),
+        historyFileIndex = parsedFiles.findIndex(function (pf) {
+          return pf && pf.source === entry.source;
+        }),
+        event = {
+          id: entry.source + ":" + entry.line + ":0",
+          kind: "prompt",
+          title: "Human prompt",
+          text: text,
+          timestamp: timestamp,
+          sessionId: id,
+          agentId: "main",
+          source: entry.source,
+          line: entry.line,
+          uuid: null,
+          parentUuid: null,
+          model: null,
+          isError: false,
+          raw: raw,
+          _seq: seq++,
+          _file: historyFileIndex >= 0 ? historyFileIndex : 0,
+        };
+      if (s.sources.indexOf(entry.source) < 0) s.sources.push(entry.source);
+      if (s.agents.indexOf("main") < 0) s.agents.push("main");
+      if (timestamp)
+        s._times.push({ value: timestamp, ms: Date.parse(timestamp) });
+      s.events.push(event);
+    });
     pendingResults.forEach(function (p) {
       var ev = p.event,
         key = ev.sessionId + "\u0000" + ev.agentId + "\u0000" + p.toolId,
@@ -492,6 +1060,7 @@
         return e.kind === "prompt" && e.text.trim();
       });
       s.title =
+        s._indexTitle ||
         s._titles[s._titles.length - 1] ||
         (firstPrompt
           ? firstPrompt.text.trim().replace(/\s+/g, " ").slice(0, 100)
@@ -546,6 +1115,30 @@
         st.cacheReadTokens += number(u.cache_read_input_tokens);
         st.cacheWriteTokens += number(u.cache_creation_input_tokens);
       });
+      var codexByAgent = new Map();
+      codexUsages.forEach(function (u, key) {
+        var parts = key.split("\u0000");
+        if (parts[0] !== s.id) return;
+        var agentKey = parts[1] || "main",
+          current = codexByAgent.get(agentKey) || {
+            thread: null,
+            turns: new Map(),
+          };
+        if (parts[2] === "thread") current.thread = u;
+        else current.turns.set(parts[2], u);
+        codexByAgent.set(agentKey, current);
+      });
+      codexByAgent.forEach(function (entry) {
+        var totals = entry.thread
+          ? [entry.thread]
+          : Array.from(entry.turns.values());
+        totals.forEach(function (u) {
+          st.inputTokens += number(u.input_tokens);
+          st.outputTokens += number(u.output_tokens);
+          st.cacheReadTokens += number(u.cached_input_tokens);
+          st.cacheWriteTokens += number(u.cache_write_input_tokens);
+        });
+      });
       s.stats = st;
       s.events.forEach(function (e) {
         delete e._seq;
@@ -554,6 +1147,7 @@
       });
       delete s._titles;
       delete s._times;
+      delete s._indexTitle;
     });
     return {
       sessions: Array.from(sessions.values()),
