@@ -126,6 +126,8 @@
             <div class="header-actions">
               <button class="button small" id="export-button" type="button">
                 Export filtered JSON</button
+              ><button class="button small" id="pdf-button" type="button">
+                Save PDF</button
               ><button class="button small" id="warnings-button" type="button">
                 Warnings <span id="warning-count" class="badge">0</span>
               </button>
@@ -260,6 +262,12 @@
         </section>
       </main>
     </div>
+    <section
+      id="print-report"
+      class="print-report"
+      aria-hidden="true"
+      hidden
+    ></section>
     <dialog id="warnings-dialog" aria-labelledby="warnings-title">
       <div class="dialog-head">
         <h2 id="warnings-title">Import warnings</h2>

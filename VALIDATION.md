@@ -23,6 +23,7 @@ An isolated jsdom harness exercised the interface using the actual HTML, CSS, an
 - Search-result previews and Go to result navigation into the normal paginated timeline, with the target highlighted and neighboring events visible.
 - Structured AskUserQuestion parsing and rendering for single-select, multi-select, custom answers, annotations, rejected questions, and missing results.
 - UTC timestamp rendering in `YYYY-MM-DD HH:mm:ss UTC` format.
+- Print-to-PDF report generation across every filtered timeline page, including readable tool details, structured questions, and linked memory; report cleanup after printing.
 - Imported HTML displayed as text, without creating executable elements.
 - Malformed-line warnings and warning-only imports.
 - Memory-only imports.

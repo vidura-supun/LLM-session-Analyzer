@@ -990,13 +990,17 @@ dialog::backdrop {
   .header-actions .button {
     font-size: 0;
   }
-  .header-actions .button:first-child:before {
-    content: "⇩";
-    font-size: 15px;
+  #export-button:before {
+    content: "JSON";
+    font-size: 11px;
   }
-  .header-actions .button:last-child:before {
-    content: "!";
-    font-size: 15px;
+  #pdf-button:before {
+    content: "PDF";
+    font-size: 11px;
+  }
+  #warnings-button:before {
+    content: "Warnings";
+    font-size: 11px;
   }
   .detail-grid {
     grid-template-columns: 1fr;
@@ -1145,6 +1149,9 @@ select:focus-visible,
   grid-column: 1/-1;
   margin: 0;
 }
+.print-report {
+  display: none;
+}
 @media (max-width: 1100px) {
   .session-summary {
     flex-direction: column;
@@ -1203,5 +1210,193 @@ select:focus-visible,
   * {
     scroll-behavior: auto !important;
     transition: none !important;
+  }
+}
+@media print {
+  @page {
+    size: A4;
+    margin: 14mm;
+  }
+  :root {
+    color: #17272c;
+    background: white;
+    font-size: 10pt;
+  }
+  body {
+    background: white;
+  }
+  .app-shell,
+  dialog {
+    display: none !important;
+  }
+  .print-report {
+    display: block !important;
+    max-width: none;
+    color: #17272c;
+  }
+  .print-cover {
+    padding-bottom: 14mm;
+    border-bottom: 2px solid #158b83;
+  }
+  .print-cover h1 {
+    margin: 2mm 0;
+    font-size: 24pt;
+    line-height: 1.15;
+  }
+  .print-cover > p,
+  .print-note {
+    color: #556568;
+  }
+  .print-cover dl {
+    display: grid;
+    gap: 2mm;
+    margin: 7mm 0 0;
+  }
+  .print-cover dl div {
+    display: grid;
+    grid-template-columns: 30mm 1fr;
+    gap: 4mm;
+  }
+  .print-cover dt {
+    color: #667679;
+    font-weight: 700;
+  }
+  .print-cover dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+  .print-timeline,
+  .print-memories {
+    margin-top: 10mm;
+  }
+  .print-timeline > h2,
+  .print-memories > h2 {
+    margin: 0 0 5mm;
+    font-size: 17pt;
+  }
+  .print-event {
+    margin: 0 0 5mm;
+    padding: 4mm;
+    border: 1px solid #d8dfdc;
+    border-left: 1.5mm solid #9baba7;
+    border-radius: 2mm;
+    break-inside: auto;
+  }
+  .print-event.prompt {
+    border-left-color: #158b83;
+  }
+  .print-event.assistant {
+    border-left-color: #63769b;
+  }
+  .print-event.thinking {
+    border-left-color: #9b7d40;
+  }
+  .print-event.tool,
+  .print-event.result {
+    border-left-color: #795d99;
+  }
+  .print-event > header {
+    display: grid;
+    grid-template-columns: 7mm minmax(0, 1fr) max-content;
+    gap: 3mm;
+    align-items: start;
+    break-after: avoid;
+  }
+  .print-event-number {
+    display: grid;
+    place-items: center;
+    width: 6mm;
+    height: 6mm;
+    border-radius: 50%;
+    background: #17272c !important;
+    color: white !important;
+    font-size: 8pt;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .print-event h3 {
+    margin: 1mm 0 0;
+    font-size: 12pt;
+  }
+  .print-event time {
+    color: #667679;
+    font-size: 8pt;
+    white-space: nowrap;
+  }
+  .print-event-text,
+  .print-tool-details pre,
+  .print-memories pre {
+    margin: 3mm 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  .print-tool-details {
+    display: grid;
+    gap: 2mm;
+    margin-top: 3mm;
+  }
+  .print-tool-details > div {
+    padding: 2.5mm;
+    border-radius: 1mm;
+    background: #f2f4f1 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .print-tool-details span {
+    color: #667679;
+    font-size: 8pt;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .print-tool-details pre {
+    font:
+      8pt/1.4 ui-monospace,
+      SFMono-Regular,
+      Menlo,
+      monospace;
+  }
+  .print-event footer {
+    margin-top: 3mm;
+    padding-top: 2mm;
+    border-top: 1px solid #e5e9e6;
+    color: #6b797b;
+    font-size: 7.5pt;
+    overflow-wrap: anywhere;
+  }
+  .question-interaction,
+  .question-card,
+  .question-option,
+  .question-answer {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .question-card {
+    break-inside: avoid-page;
+  }
+  .question-option details > *,
+  .question-annotation > * {
+    display: block;
+  }
+  .print-memories article {
+    margin-top: 5mm;
+    padding-top: 4mm;
+    border-top: 1px solid #d8dfdc;
+  }
+  .print-memories article h3 {
+    margin: 0 0 2mm;
+  }
+  .print-memories pre {
+    font:
+      8.5pt/1.45 ui-monospace,
+      SFMono-Regular,
+      Menlo,
+      monospace;
+  }
+  .print-empty {
+    margin-top: 10mm;
+    padding: 5mm;
+    background: #f2f4f1 !important;
   }
 }

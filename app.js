@@ -180,6 +180,7 @@
         "session-tags",
         "stat-grid",
         "warnings-list",
+        "print-report",
         "session-title",
         "session-meta",
         "active-source",
@@ -282,6 +283,8 @@
       (state.workspace && state.workspace.memories) ||
       []
     ).length;
+    $("export-button").disabled = !s;
+    $("pdf-button").disabled = !s && !state.memories.length;
   }
   function filtered() {
     const s = session();
@@ -321,7 +324,7 @@
       .replace(/\s+/g, " ")
       .trim();
   }
-  function questionInteractionHTML(interaction) {
+  function questionInteractionHTML(interaction, expanded) {
     if (!interaction || !Array.isArray(interaction.questions)) return "";
     const stateLabels = {
       answered: "Answered",
@@ -343,7 +346,7 @@
                   : interaction.state === "unanswered"
                     ? "The result contains no structured answer."
                     : "";
-        return `<article class="question-card"><div class="question-heading"><span class="question-number">${index + 1}</span><div><span class="question-header">${esc(question.header || "Question")}</span><span class="question-mode">${question.multiSelect ? "Multiple choices allowed" : "Choose one"}</span></div></div><h4>${esc(question.question || "Question text unavailable")}</h4>${question.options.length ? `<ul class="question-options">${question.options.map((option) => `<li class="question-option ${option.selected ? "selected" : ""}"><span class="option-marker" aria-hidden="true">${option.selected ? "✓" : ""}</span><div><strong>${esc(option.label || "Unnamed option")}</strong>${option.description ? `<p>${esc(option.description)}</p>` : ""}${option.preview ? `<details><summary>Option preview</summary><pre>${esc(option.preview)}</pre></details>` : ""}</div></li>`).join("")}</ul>` : '<p class="question-empty">No predefined choices were recorded.</p>'}${answer ? `<div class="question-answer"><span>Recorded answer</span><strong>${esc(answer)}</strong></div>` : `<div class="question-answer empty"><span>Answer</span><p>${esc(answerLabel || "No answer recorded.")}</p></div>`}${question.annotation ? `<details class="question-annotation"><summary>Answer annotation</summary><pre>${esc(text(question.annotation))}</pre></details>` : ""}</article>`;
+        return `<article class="question-card"><div class="question-heading"><span class="question-number">${index + 1}</span><div><span class="question-header">${esc(question.header || "Question")}</span><span class="question-mode">${question.multiSelect ? "Multiple choices allowed" : "Choose one"}</span></div></div><h4>${esc(question.question || "Question text unavailable")}</h4>${question.options.length ? `<ul class="question-options">${question.options.map((option) => `<li class="question-option ${option.selected ? "selected" : ""}"><span class="option-marker" aria-hidden="true">${option.selected ? "✓" : ""}</span><div><strong>${esc(option.label || "Unnamed option")}</strong>${option.description ? `<p>${esc(option.description)}</p>` : ""}${option.preview ? `<details${expanded ? " open" : ""}><summary>Option preview</summary><pre>${esc(option.preview)}</pre></details>` : ""}</div></li>`).join("")}</ul>` : '<p class="question-empty">No predefined choices were recorded.</p>'}${answer ? `<div class="question-answer"><span>Recorded answer</span><strong>${esc(answer)}</strong></div>` : `<div class="question-answer empty"><span>Answer</span><p>${esc(answerLabel || "No answer recorded.")}</p></div>`}${question.annotation ? `<details class="question-annotation"${expanded ? " open" : ""}><summary>Answer annotation</summary><pre>${esc(text(question.annotation))}</pre></details>` : ""}</article>`;
       })
       .join("")}</section>`;
   }
@@ -559,6 +562,103 @@
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 500);
   }
+  function printFilterDescription() {
+    const active = [];
+    if (state.filters.query) active.push(`Search: “${state.filters.query}”`);
+    if (state.filters.tool) active.push(`Tool: ${state.filters.tool}`);
+    if (state.filters.agent) active.push(`Agent: ${state.filters.agent}`);
+    if (state.filters.errors) active.push("Errors only");
+    const allKinds = [
+        "prompt",
+        "assistant",
+        "thinking",
+        "tool",
+        "result",
+        "system",
+      ],
+      visibleKinds = allKinds.filter((kind) => state.filters.kinds.has(kind));
+    if (visibleKinds.length !== allKinds.length)
+      active.push(`Event types: ${visibleKinds.join(", ")}`);
+    return active.length
+      ? active.join(" · ")
+      : "No filters — all recorded events";
+  }
+  function printEventHTML(event, index) {
+    const tool = event.tool,
+      interaction = tool && tool.questionInteraction,
+      sections = [];
+    if (event.text)
+      sections.push(`<div class="print-event-text">${esc(event.text)}</div>`);
+    if (interaction) sections.push(questionInteractionHTML(interaction, true));
+    if (tool) {
+      const toolDetails = [];
+      if (tool.command) toolDetails.push(["Command", tool.command]);
+      if (tool.input != null) toolDetails.push(["Input", text(tool.input)]);
+      if (tool.result) toolDetails.push(["Result", text(tool.result)]);
+      if (!tool.result && tool.status === "pending")
+        toolDetails.push(["Result", "No result was recorded."]);
+      if (toolDetails.length)
+        sections.push(
+          `<div class="print-tool-details">${toolDetails.map(([label, value]) => `<div><span>${esc(label)}</span><pre>${esc(value)}</pre></div>`).join("")}</div>`,
+        );
+    }
+    return `<article class="print-event ${esc(event.kind)}"><header><span class="print-event-number">${index + 1}</span><div><span class="kind-pill">${esc(interaction ? "question" : event.kind)}</span><h3>${esc(event.title || (tool && tool.name) || event.kind)}</h3></div><time>${esc(date(event.timestamp))}</time></header>${sections.join("")}<footer>${esc(event.agentId || "main")} · ${esc(event.source || "unknown source")}${event.line ? ` · line ${event.line}` : ""}</footer></article>`;
+  }
+  function buildPrintReport() {
+    const current = session(),
+      events = current ? filtered() : [],
+      memories = current
+        ? current.memories || []
+        : (state.workspace && state.workspace.memories) || [],
+      title = current ? current.title || current.id : "Memory workspace",
+      metadata = current
+        ? [
+            current.id,
+            current.cwd,
+            current.branch,
+            current.startTime && current.endTime
+              ? `${date(current.startTime)} — ${date(current.endTime)}`
+              : current.startTime && date(current.startTime),
+          ]
+            .filter(Boolean)
+            .join(" · ")
+        : "Imported memory documents",
+      memoryHTML = memories.length
+        ? `<section class="print-memories"><h2>Linked memory</h2><p class="print-note">Memory is current context and may have changed after the recorded session.</p>${memories.map((memory) => `<article><h3>${esc(memory.name || memory.id || "Memory")}</h3>${memory.description ? `<p>${esc(memory.description)}</p>` : ""}<pre>${esc(memory.content || memory.body || "")}</pre></article>`).join("")}</section>`
+        : "";
+    return {
+      title,
+      html: `<header class="print-cover"><div class="eyebrow">LLM SESSION ANALYZER</div><h1>${esc(title)}</h1><p>${esc(metadata)}</p><dl><div><dt>Generated</dt><dd>${esc(date(new Date().toISOString()))}</dd></div><div><dt>Timeline events</dt><dd>${num(events.length)}</dd></div><div><dt>Filters</dt><dd>${esc(printFilterDescription())}</dd></div></dl></header>${events.length ? `<section class="print-timeline"><h2>Timeline</h2>${events.map(printEventHTML).join("")}</section>` : current ? '<p class="print-empty">No timeline events match the active filters.</p>' : ""}${memoryHTML}`,
+    };
+  }
+  function savePDF() {
+    const report = $("print-report"),
+      built = buildPrintReport(),
+      previousTitle = document.title;
+    report.innerHTML = built.html;
+    report.hidden = false;
+    report.setAttribute("aria-hidden", "false");
+    document.title = `${built.title} — LLM session Analyzer`;
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      report.hidden = true;
+      report.setAttribute("aria-hidden", "true");
+      report.replaceChildren();
+      document.title = previousTitle;
+      window.removeEventListener("afterprint", cleanup);
+    };
+    window.addEventListener("afterprint", cleanup);
+    requestAnimationFrame(() => {
+      window.print();
+      setTimeout(() => {
+        if (!document.hasFocus()) return;
+        cleanup();
+      }, 1000);
+    });
+    announce("Print dialog opened. Choose Save as PDF to download the report.");
+  }
   function showWarnings() {
     const w = (state.workspace && state.workspace.warnings) || [];
     $("warnings-list").innerHTML = w.length
@@ -668,6 +768,7 @@
       renderTimeline();
     };
     $("export-button").onclick = exportFiltered;
+    $("pdf-button").onclick = savePDF;
     $("warnings-button").onclick = showWarnings;
     document.querySelector("[data-close-dialog]").onclick = () =>
       $("warnings-dialog").close();
