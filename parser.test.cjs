@@ -90,6 +90,129 @@ test("pairs tools by session and agent, preserves provenance, and leaves orphan"
   assert.equal(s.stats.outputTokens, 9);
 });
 
+test("AskUserQuestion keeps choices and structured answers", () => {
+  const question = "Which output formats?";
+  const rows = [
+    {
+      type: "assistant",
+      sessionId: "questions",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "ask-1",
+            name: "AskUserQuestion",
+            input: {
+              questions: [
+                {
+                  header: "Formats",
+                  question,
+                  multiSelect: true,
+                  options: [
+                    { label: "JSON", description: "Machine readable" },
+                    { label: "Markdown", description: "Human readable" },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    },
+    {
+      type: "user",
+      sessionId: "questions",
+      toolUseResult: {
+        questions: [
+          {
+            header: "Formats",
+            question,
+            multiSelect: true,
+            options: [
+              { label: "JSON", description: "Machine readable" },
+              { label: "Markdown", description: "Human readable" },
+            ],
+          },
+        ],
+        answers: { [question]: "JSON, Markdown" },
+        annotations: { [question]: { note: "Both are useful" } },
+      },
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "ask-1",
+            content: "Questions answered",
+          },
+        ],
+      },
+    },
+  ];
+  const tool = P.buildWorkspace([
+    P.parseJSONL(rows.map(JSON.stringify).join("\n"), "questions.jsonl"),
+  ]).sessions[0].events.find((event) => event.kind === "tool").tool;
+  assert.equal(tool.questionInteraction.state, "answered");
+  assert.equal(tool.questionInteraction.questions[0].answer, "JSON, Markdown");
+  assert.deepEqual(
+    tool.questionInteraction.questions[0].options.map(
+      (option) => option.selected,
+    ),
+    [true, true],
+  );
+  assert.deepEqual(tool.questionInteraction.questions[0].annotation, {
+    note: "Both are useful",
+  });
+});
+
+test("AskUserQuestion records rejection and preserves unanswered question", () => {
+  const rows = [
+    {
+      type: "assistant",
+      sessionId: "questions",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "ask-2",
+            name: "AskUserQuestion",
+            input: {
+              questions: [
+                {
+                  header: "Scope",
+                  question: "What should change?",
+                  multiSelect: false,
+                  options: [{ label: "Parser", description: "Parsing only" }],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    },
+    {
+      type: "user",
+      sessionId: "questions",
+      toolUseResult: "Error: user wants to clarify these questions",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "ask-2",
+            content: "The user doesn't want to proceed; clarify the question.",
+            is_error: true,
+          },
+        ],
+      },
+    },
+  ];
+  const event = P.buildWorkspace([
+    P.parseJSONL(rows.map(JSON.stringify).join("\n"), "questions.jsonl"),
+  ]).sessions[0].events.find((item) => item.kind === "tool");
+  assert.equal(event.tool.questionInteraction.state, "rejected");
+  assert.equal(event.tool.questionInteraction.questions[0].answer, null);
+  assert.equal(event.isError, true);
+});
+
 test("metadata users and unknown records remain system; memory links only explicitly", () => {
   const p = P.parseJSONL(
     [

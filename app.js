@@ -33,9 +33,9 @@
   const date = (t) => {
     if (!t) return "No timestamp recorded";
     const d = new Date(t);
-    return isNaN(d)
-      ? String(t)
-      : d.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+    if (isNaN(d)) return String(t);
+    const pad = (value) => String(value).padStart(2, "0");
+    return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} UTC`;
   };
   function announce(s) {
     let e = $("status-live");
@@ -313,12 +313,39 @@
       e.tool && e.tool.result,
       e.tool && e.tool.command,
       e.tool && e.tool.resultRaw,
+      e.tool && e.tool.questionInteraction,
     ]
       .map(text)
       .filter(Boolean)
       .join(" ")
       .replace(/\s+/g, " ")
       .trim();
+  }
+  function questionInteractionHTML(interaction) {
+    if (!interaction || !Array.isArray(interaction.questions)) return "";
+    const stateLabels = {
+      answered: "Answered",
+      rejected: "Clarification requested",
+      error: "Question failed",
+      unanswered: "No answer recorded",
+      pending: "No result recorded",
+    };
+    return `<section class="question-interaction" aria-label="Questions and answers"><div class="question-state ${esc(interaction.state)}">${esc(stateLabels[interaction.state] || interaction.state)}</div>${interaction.questions
+      .map((question, index) => {
+        const answer = question.answer == null ? "" : text(question.answer),
+          answerLabel =
+            interaction.state === "rejected"
+              ? "The user requested clarification; no answer was selected."
+              : interaction.state === "pending"
+                ? "The log has no result for this question."
+                : interaction.state === "error"
+                  ? "The question ended with an error and no structured answer."
+                  : interaction.state === "unanswered"
+                    ? "The result contains no structured answer."
+                    : "";
+        return `<article class="question-card"><div class="question-heading"><span class="question-number">${index + 1}</span><div><span class="question-header">${esc(question.header || "Question")}</span><span class="question-mode">${question.multiSelect ? "Multiple choices allowed" : "Choose one"}</span></div></div><h4>${esc(question.question || "Question text unavailable")}</h4>${question.options.length ? `<ul class="question-options">${question.options.map((option) => `<li class="question-option ${option.selected ? "selected" : ""}"><span class="option-marker" aria-hidden="true">${option.selected ? "✓" : ""}</span><div><strong>${esc(option.label || "Unnamed option")}</strong>${option.description ? `<p>${esc(option.description)}</p>` : ""}${option.preview ? `<details><summary>Option preview</summary><pre>${esc(option.preview)}</pre></details>` : ""}</div></li>`).join("")}</ul>` : '<p class="question-empty">No predefined choices were recorded.</p>'}${answer ? `<div class="question-answer"><span>Recorded answer</span><strong>${esc(answer)}</strong></div>` : `<div class="question-answer empty"><span>Answer</span><p>${esc(answerLabel || "No answer recorded.")}</p></div>`}${question.annotation ? `<details class="question-annotation"><summary>Answer annotation</summary><pre>${esc(text(question.annotation))}</pre></details>` : ""}</article>`;
+      })
+      .join("")}</section>`;
   }
   function searchResultPreview(e, query) {
     const value = eventSearchText(e) || "No text preview recorded.",
@@ -399,9 +426,20 @@
         : e.text
           ? `<p class="event-text" tabindex="0">${esc(e.text)}</p>`
           : "";
-    const status =
-      t && t.status === "pending" ? "No recorded result" : t && t.status;
-    return `<article data-event-id="${esc(e.id || "")}" class="event ${esc(e.kind)} ${e.isError ? "error" : ""}"><div class="event-head"><span class="kind-pill">${esc(e.kind)}</span>${t ? `<span class="tool-status ${esc(t.status || "")}">${esc(status || "recorded")}</span>` : ""}<span class="event-meta">${esc(e.agentId && e.agentId !== "main" ? e.agentId + " · " : "")}${esc(date(e.timestamp))}</span></div><div class="event-body"><h3 class="event-title">${esc(e.title || (t && t.name) || e.kind)}</h3>${body}<details><summary>${t && t.command ? esc(t.command.slice(0, 100)) + " · " : ""}Inspect record &amp; provenance</summary><div class="detail-grid">${d.map((x) => `<div class="detail-block"><div class="detail-label">${esc(x[0])}</div><div class="codebox" tabindex="0">${esc(x[1])}</div></div>`).join("")}</div></details></div></article>`;
+    const questionInteraction = t && t.questionInteraction,
+      displayState = questionInteraction
+        ? questionInteraction.state
+        : t && t.status,
+      statusLabels = {
+        pending: "No recorded result",
+        answered: "Answered",
+        rejected: "Clarification requested",
+        unanswered: "No answer recorded",
+        error: "Error",
+        success: "Success",
+      },
+      status = statusLabels[displayState] || displayState;
+    return `<article data-event-id="${esc(e.id || "")}" class="event ${esc(e.kind)} ${questionInteraction ? "question-event" : ""} ${e.isError ? "error" : ""}"><div class="event-head"><span class="kind-pill">${esc(questionInteraction ? "question" : e.kind)}</span>${t ? `<span class="tool-status ${esc(displayState || "")}">${esc(status || "recorded")}</span>` : ""}<span class="event-meta">${esc(e.agentId && e.agentId !== "main" ? e.agentId + " · " : "")}${esc(date(e.timestamp))}</span></div><div class="event-body"><h3 class="event-title">${esc(e.title || (t && t.name) || e.kind)}</h3>${body}${questionInteractionHTML(questionInteraction)}<details><summary>${t && t.command ? esc(t.command.slice(0, 100)) + " · " : ""}Inspect record &amp; provenance</summary><div class="detail-grid">${d.map((x) => `<div class="detail-block"><div class="detail-label">${esc(x[0])}</div><div class="codebox" tabindex="0">${esc(x[1])}</div></div>`).join("")}</div></details></div></article>`;
   }
   function renderTimeline() {
     const s = session();

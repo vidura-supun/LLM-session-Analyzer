@@ -164,6 +164,85 @@
     if (raw.message && typeof raw.message === "string") return raw.message;
     return kind === "system" ? string(raw) : "";
   }
+  function questionList(input) {
+    if (!object(input) || !Array.isArray(input.questions)) return [];
+    return input.questions.filter(object).map(function (question) {
+      return {
+        header: string(question.header),
+        question: string(question.question),
+        multiSelect: !!question.multiSelect,
+        options: (Array.isArray(question.options) ? question.options : [])
+          .filter(object)
+          .map(function (option) {
+            return {
+              label: string(option.label),
+              description: string(option.description),
+              preview: string(option.preview),
+              selected: false,
+            };
+          }),
+        answer: null,
+        annotation: null,
+      };
+    });
+  }
+  function questionInteraction(input) {
+    var questions = questionList(input);
+    return questions.length
+      ? { state: "pending", questions: questions, answers: {} }
+      : null;
+  }
+  function applyQuestionResult(tool, raw, isError) {
+    if (!tool.questionInteraction) return;
+    var structured = object(raw.toolUseResult) ? raw.toolUseResult : null,
+      resultQuestions = structured && questionList(structured),
+      questions =
+        resultQuestions && resultQuestions.length
+          ? resultQuestions
+          : tool.questionInteraction.questions,
+      answers =
+        structured && object(structured.answers)
+          ? structured.answers
+          : Object.create(null),
+      annotations =
+        structured && object(structured.annotations)
+          ? structured.annotations
+          : Object.create(null),
+      answered = 0;
+    questions.forEach(function (question) {
+      if (Object.prototype.hasOwnProperty.call(answers, question.question)) {
+        question.answer = answers[question.question];
+        answered++;
+      }
+      if (Object.prototype.hasOwnProperty.call(annotations, question.question))
+        question.annotation = annotations[question.question];
+      var answerValues = [];
+      if (Array.isArray(question.answer))
+        answerValues = question.answer.map(String);
+      else if (typeof question.answer === "string") {
+        var exactOption = question.options.some(function (option) {
+          return option.label === question.answer;
+        });
+        answerValues = exactOption
+          ? [question.answer]
+          : question.multiSelect
+            ? question.answer.split(/,\s*/)
+            : [question.answer];
+      }
+      question.options.forEach(function (option) {
+        option.selected = answerValues.indexOf(option.label) >= 0;
+      });
+    });
+    tool.questionInteraction.questions = questions;
+    tool.questionInteraction.answers = answers;
+    tool.questionInteraction.state = isError
+      ? /clarif|doesn't want to proceed|rejected/i.test(tool.result)
+        ? "rejected"
+        : "error"
+      : answered
+        ? "answered"
+        : "unanswered";
+  }
   function buildWorkspace(parsedFiles, memories) {
     parsedFiles = Array.isArray(parsedFiles) ? parsedFiles : [];
     memories = Array.isArray(memories) ? memories : [];
@@ -314,7 +393,12 @@
               resultLine: null,
               resultRaw: null,
               durationMs: number(raw.durationMs) || null,
+              questionInteraction:
+                String(block.name || "").toLowerCase() === "askuserquestion"
+                  ? questionInteraction(input)
+                  : null,
             };
+            if (ev.tool.questionInteraction) ev.title = "Questions for user";
             if (ev.tool.id) {
               var tk = sid + "\u0000" + agent + "\u0000" + ev.tool.id,
                 tq = toolCalls.get(tk) || [];
@@ -349,6 +433,7 @@
         call.tool.resultRaw = ev.raw;
         call.tool.status = ev.isError || p.block.is_error ? "error" : "success";
         call.isError = call.tool.status === "error";
+        applyQuestionResult(call.tool, ev.raw, call.isError);
         if (!call.tool.durationMs && call.timestamp && ev.timestamp) {
           var elapsed = Date.parse(ev.timestamp) - Date.parse(call.timestamp);
           if (Number.isFinite(elapsed) && elapsed >= 0)
