@@ -1,0 +1,19 @@
+# Private session logs, including compressed copies
+*.jsonl
+*.jsonl.*
+
+# Imported context and analysis output
+memory/
+sessions/
+imports/
+exports/
+*-filtered.json
+
+# Local configuration and development artifacts
+.env
+.env.*
+!.env.example
+.DS_Store
+node_modules/
+coverage/
+*.log

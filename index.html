@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>LLM session Analyzer — Claude session workbench</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Session navigation">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">◒</span
+          ><span>LLM session Analyzer</span>
+        </div>
+        <p class="brand-sub">A calm view into recorded work.</p>
+        <div class="sidebar-actions">
+          <button class="button primary" type="button" data-import="file-input">
+            ＋ Import files
+          </button>
+          <input
+            id="file-input"
+            type="file"
+            multiple
+            accept=".jsonl,.md"
+            aria-label="Select session logs and memories"
+            hidden
+          />
+          <button
+            class="button secondary"
+            type="button"
+            data-import="folder-input"
+          >
+            ⌁ Import folder
+          </button>
+          <input
+            id="folder-input"
+            type="file"
+            webkitdirectory
+            directory
+            multiple
+            aria-label="Select a folder of session logs"
+            hidden
+          />
+          <button class="button ghost" id="demo-button" type="button">
+            ✦ Open fictional demo
+          </button>
+        </div>
+        <div
+          class="dropzone"
+          id="dropzone"
+          tabindex="0"
+          role="button"
+          aria-label="Drop session files here or activate to import"
+        >
+          <span aria-hidden="true">↧</span><span>Drop files here</span
+          ><small>.jsonl · .md</small>
+        </div>
+        <p
+          id="status-live"
+          class="import-status"
+          role="status"
+          aria-live="polite"
+        >
+          Local files only. Nothing is uploaded.
+        </p>
+        <div class="session-heading">
+          <span>Sessions</span><span id="session-count" class="count">0</span>
+        </div>
+        <label class="search-wrap sidebar-search"
+          ><span class="sr-only">Search sessions</span
+          ><input
+            id="session-search"
+            type="search"
+            placeholder="Find a session…"
+            autocomplete="off"
+          /><kbd>/</kbd></label
+        >
+        <nav
+          id="session-list"
+          class="session-list"
+          aria-label="Imported sessions"
+        ></nav>
+        <div class="sidebar-foot">
+          <button id="clear-button" type="button" class="text-button">
+            Clear workspace</button
+          ><span id="source-count">No sources</span>
+        </div>
+      </aside>
+
+      <main class="main" id="main-content">
+        <div id="empty-state" class="empty-state">
+          <div class="empty-orbit" aria-hidden="true">◌</div>
+          <h1>Make a session legible.</h1>
+          <p>
+            Import JSONL session logs or Markdown memories to inspect prompts,
+            tools, branches, and recorded usage in one quiet workspace.
+          </p>
+          <div class="empty-actions">
+            <button
+              class="button primary"
+              type="button"
+              data-import="file-input"
+            >
+              Choose files</button
+            ><button class="button secondary" id="empty-demo" type="button">
+              Try the fictional demo
+            </button>
+          </div>
+          <p class="privacy-note">
+            Everything stays in this browser tab. Imported text is displayed as
+            text, never executed.
+          </p>
+        </div>
+        <section id="workspace" class="workspace" hidden>
+          <header class="workspace-header">
+            <div class="breadcrumbs">
+              <span>Workspace</span><span aria-hidden="true">/</span
+              ><span id="active-source">Session</span>
+            </div>
+            <div class="header-actions">
+              <button class="button small" id="export-button" type="button">
+                Export filtered JSON</button
+              ><button class="button small" id="warnings-button" type="button">
+                Warnings <span id="warning-count" class="badge">0</span>
+              </button>
+            </div>
+          </header>
+          <section class="session-summary" aria-labelledby="session-title">
+            <div class="summary-title">
+              <div class="eyebrow">RECORDED SESSION</div>
+              <h1 id="session-title">—</h1>
+              <p id="session-meta" class="muted">—</p>
+              <div id="session-tags" class="tags"></div>
+            </div>
+            <div class="stat-grid" id="stat-grid"></div>
+          </section>
+          <div class="tabs" role="tablist" aria-label="Session views">
+            <button
+              id="timeline-tab"
+              role="tab"
+              aria-controls="timeline-pane"
+              aria-selected="true"
+              class="tab active"
+              data-tab="timeline"
+            >
+              Timeline
+              <span id="timeline-count" class="tab-count">0</span></button
+            ><button
+              id="memory-tab"
+              role="tab"
+              aria-controls="memory-pane"
+              aria-selected="false"
+              class="tab"
+              data-tab="memory"
+            >
+              Memory <span id="memory-count" class="tab-count">0</span>
+            </button>
+          </div>
+          <section
+            id="timeline-pane"
+            class="tab-pane"
+            role="tabpanel"
+            aria-labelledby="timeline-tab"
+          >
+            <div class="filterbar">
+              <label class="search-wrap filter-search"
+                ><span class="sr-only">Search timeline</span
+                ><input
+                  id="timeline-search"
+                  type="search"
+                  placeholder="Search prompts, tools, outputs…"
+                  autocomplete="off"
+                /><span class="search-icon" aria-hidden="true">⌕</span></label
+              >
+              <label class="select-wrap"
+                ><span class="sr-only">Filter by tool</span
+                ><select id="tool-filter">
+                  <option value="">All tools</option>
+                </select></label
+              >
+              <label class="select-wrap"
+                ><span class="sr-only">Filter by agent</span
+                ><select id="agent-filter">
+                  <option value="">All agents</option>
+                </select></label
+              >
+              <label class="check"
+                ><input id="errors-filter" type="checkbox" /><span
+                  >Errors only</span
+                ></label
+              ><button id="reset-filters" class="text-button" type="button">
+                Reset
+              </button>
+            </div>
+            <div class="kindbar" role="group" aria-label="Event types">
+              <span class="filter-label">Show</span
+              ><label
+                ><input type="checkbox" data-kind="prompt" checked /><span
+                  >Prompts</span
+                ></label
+              ><label
+                ><input type="checkbox" data-kind="assistant" checked /><span
+                  >Assistant</span
+                ></label
+              ><label
+                ><input type="checkbox" data-kind="thinking" checked /><span
+                  >Thinking</span
+                ></label
+              ><label
+                ><input type="checkbox" data-kind="tool" checked /><span
+                  >Tools</span
+                ></label
+              ><label
+                ><input type="checkbox" data-kind="system" /><span
+                  >System</span
+                ></label
+              ><span
+                id="match-count"
+                class="match-count"
+                aria-live="polite"
+              ></span>
+            </div>
+            <p class="timeline-note">
+              Recorded events, earliest first. Enable System to see context and
+              configuration changes. Thinking shows only what the log contains.
+            </p>
+            <div id="prompt-jump" class="prompt-jump" hidden></div>
+            <div id="timeline" class="timeline" aria-live="polite"></div>
+            <div class="pager">
+              <button id="prev-page" class="button small" type="button">
+                ← Previous</button
+              ><span id="page-label">Page 1</span
+              ><button id="next-page" class="button small" type="button">
+                Next →
+              </button>
+            </div>
+          </section>
+          <section
+            id="memory-pane"
+            class="tab-pane memory-pane"
+            role="tabpanel"
+            aria-labelledby="memory-tab"
+            hidden
+          >
+            <div id="memory-list" class="memory-list"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+    <dialog id="warnings-dialog" aria-labelledby="warnings-title">
+      <div class="dialog-head">
+        <h2 id="warnings-title">Import warnings</h2>
+        <button class="icon-button" data-close-dialog aria-label="Close">
+          ×
+        </button>
+      </div>
+      <div id="warnings-list" class="warnings-list"></div>
+    </dialog>
+    <script src="parser.js"></script>
+    <script src="demo.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
