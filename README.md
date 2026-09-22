@@ -1,21 +1,33 @@
 # LLM session Analyzer
 
-A standalone, offline viewer for Claude Code and Codex session JSONL files. Open `index.html` in a browser. No installation, server, account, or API key is needed. Keep `index.html`, `styles.css`, `parser.js`, `app.js`, and `demo.js` together.
+A standalone, offline viewer for Claude Code, Codex, Gemini/Antigravity, and OpenCode sessions. Open `index.html` in a browser. No installation, server, account, or API key is needed. Keep `index.html`, `styles.css`, `parser.js`, `app.js`, and `demo.js` together.
 
 ## Use
 
-1. Open `index.html` and choose files, drag in logs, or select a session-data folder. Folder import includes nested JSONL logs. Markdown is imported from `memory` or `memories` directories only, so selecting a broad folder such as `.codex` does not accidentally ingest skills and documentation. You can still select an individual `.md` memory file directly. Use **Demo** to try fictional data first.
+1. Open `index.html` and choose files, drag in logs, or select a session-data folder. Folder import includes supported nested JSONL logs and OpenCode JSON exports. Markdown is imported from `memory` or `memories` directories only, so broad tool folders do not accidentally ingest skills and documentation. You can still select an individual `.md` memory file directly. Use **Demo** to try fictional data first.
 2. Select a session. Browse prompts, assistant replies, recorded thinking, tool calls with their results, structured AskUserQuestion choices and answers, and system events. Expand a card to inspect its full content and source record. Timestamps are shown in UTC as `YYYY-MM-DD HH:mm:ss UTC`.
 3. Search and filter the timeline by event type, tool, agent, or errors. Search results include **Go to result**, which restores the normal timeline on the correct page and focuses the matching event so you can read the surrounding context. Jump between prompts to follow the work. Export the filtered events as JSON, or choose **Save PDF** and select **Save as PDF** in the browser print dialog. The PDF contains all matching events across timeline pages plus linked memory.
 4. Open the memory view to read imported Markdown documents and follow explicit origin-session links.
 
 Select the folder containing your session logs as the import folder. For Claude Code, select the relevant Claude project/session directory. For Codex on this computer, you can select `/Users/vidura/.codex`; the viewer finds supported JSONL records below it and skips unrelated files, including skill and documentation Markdown. To narrow the import, select `/Users/vidura/.codex/sessions` instead. The viewer imports data only when you select it; it does not automatically scan your disk.
 
+For Gemini/Antigravity, select `/Users/vidura/.gemini`. The importer uses each session's canonical `antigravity-cli/brain/<session>/.system_generated/logs/transcript_full.jsonl` and skips the shorter transcript and chunk duplicates, configuration JSON, generated messages, and unrelated Markdown.
+
+OpenCode keeps its live sessions in a SQLite database under `/Users/vidura/.local/share/opencode`; `/Users/vidura/.opencode` is the CLI installation rather than the session store. The browser intentionally does not open the live database, which also contains credential-related tables. Export a session first, preferably with redaction, and then import the resulting JSON file:
+
+```sh
+opencode export <session-id> --sanitize > opencode-session.json
+```
+
+Use `opencode session list` to find a session ID. Some newer OpenCode releases expose the equivalent command as `opencode session export <session-id> --sanitize`.
+
 Importing an individual JSONL file cannot also read neighboring memory or subagent files: select those files too, or import their parent folder. Folder-imported Markdown must be below a directory named `memory` or `memories`; directly selected `.md` files are accepted wherever they live.
 
 Folder import reads `.jsonl` logs and eligible memory `.md` documents, skipping unrelated files and agent `.meta.json` sidecars. System events start hidden to keep the timeline readable; enable **System** to inspect them. Thinking starts collapsed. Filters apply together, and export includes all matching events across pages.
 
 Codex support includes session metadata and turn context; user, assistant, and recorded reasoning-summary messages; commands, file changes, MCP and collaboration tool calls with their outputs; web-search calls; recorded token totals; and compaction records. Duplicate low-level response records are suppressed, while lifecycle and runtime-state records remain inspectable as system events.
+
+Gemini support includes user input, planner responses, recorded thinking, commands and other tool activity, subagent actions, questions, checkpoints, errors, and system messages. OpenCode exports include user/assistant text, recorded reasoning, tool inputs and outputs, errors, models, agents, and token/cache usage.
 
 ## What the viewer means
 
@@ -44,4 +56,4 @@ node --test parser.test.cjs
 
 The original session and memory files are kept separate and are never modified by this viewer.
 
-Real session data is not included in this repository. To run the optional aggregate tests against your own local logs, set `CLAUDE_SESSION_FIXTURES` to a Claude log parent folder and/or `CODEX_SESSION_FIXTURES` to a Codex session folder before running the tests. Keep imported logs, memories, and exports out of version control; `.gitignore` excludes common data paths and all `.jsonl` files.
+Real session data is not included in this repository. Optional aggregate tests use `CLAUDE_SESSION_FIXTURES`, `CODEX_SESSION_FIXTURES`, `GEMINI_SESSION_FIXTURES`, and `OPENCODE_SESSION_FIXTURES` when set to local fixture locations. Keep imported logs, memories, databases, and exports out of version control; `.gitignore` excludes common data paths, JSONL, and local database files.

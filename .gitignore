@@ -1,6 +1,9 @@
 # Private session logs, including compressed copies
 *.jsonl
 *.jsonl.*
+*.db
+*.db-shm
+*.db-wal
 
 # Imported context and analysis output
 memory/
@@ -8,6 +11,8 @@ sessions/
 imports/
 exports/
 *-filtered.json
+opencode-session*.json
+session-export*.json
 
 # Local configuration and development artifacts
 .env

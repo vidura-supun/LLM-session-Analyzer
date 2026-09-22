@@ -15,6 +15,237 @@ test("JSONL tolerates BOM, CRLF, blanks and malformed/non-object lines", () => {
   );
 });
 
+test("JSON parser accepts a full object and reports malformed/non-object documents", () => {
+  const parsed = P.parseJSON('\ufeff{\n  "info": {},\n  "messages": []\n}', "session.json");
+  assert.equal(parsed.records.length, 1);
+  assert.equal(parsed.records[0].line, 1);
+  assert.equal(parsed.totalLines, 4);
+  assert.equal(parsed.warnings.length, 0);
+
+  for (const source of ["[1,2,3]", "not json", '{"config":true}']) {
+    const invalid = P.parseJSON(source, "invalid.json");
+    assert.equal(invalid.records.length, 0);
+    assert.equal(invalid.warnings.length, 1);
+    assert.equal(invalid.warnings[0].line, 1);
+  }
+});
+
+test("OpenCode JSON exports normalize messages, parts, tools, errors, agents, models, and tokens", () => {
+  const exported = {
+    info: {
+      id: "ses_synthetic",
+      title: "Synthetic OpenCode session",
+      directory: "/workspace/project",
+      agent: "plan",
+      model: { providerID: "provider", id: "root-model" },
+      tokens: {
+        input: 30,
+        output: 20,
+        reasoning: 7,
+        cache: { read: 4, write: 2 },
+      },
+      time: { created: 1788163200000, updated: 1788163260000 },
+    },
+    messages: [
+      {
+        info: {
+          id: "msg_user",
+          sessionID: "ses_synthetic",
+          role: "user",
+          agent: "plan",
+          model: { providerID: "provider", modelID: "prompt-model" },
+          time: { created: 1788163201000 },
+        },
+        parts: [
+          {
+            id: "prt_prompt",
+            type: "text",
+            text: "Build the feature",
+            time: { start: 1788163201000, end: 1788163201100 },
+          },
+        ],
+      },
+      {
+        info: {
+          id: "msg_assistant",
+          sessionID: "ses_synthetic",
+          role: "assistant",
+          parentID: "msg_user",
+          agent: "build",
+          providerID: "provider",
+          modelID: "assistant-model",
+          tokens: {
+            input: 99,
+            output: 88,
+            reasoning: 77,
+            cache: { read: 66, write: 55 },
+          },
+          time: { created: 1788163202000, completed: 1788163205000 },
+        },
+        parts: [
+          {
+            id: "prt_reasoning",
+            type: "reasoning",
+            text: "Inspecting the request",
+            time: { start: 1788163202000, end: 1788163202500 },
+          },
+          {
+            id: "prt_answer",
+            type: "text",
+            text: "Implemented.",
+            time: { start: 1788163202500, end: 1788163203000 },
+          },
+          {
+            id: "prt_tool_success",
+            type: "tool",
+            callID: "call_success",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { command: ["npm", "test"] },
+              output: "all tests passed",
+              title: "Run tests",
+              metadata: {},
+              time: { start: 1788163203000, end: 1788163203250 },
+            },
+          },
+        ],
+      },
+      {
+        info: {
+          id: "msg_error",
+          sessionID: "ses_synthetic",
+          role: "assistant",
+          parentID: "msg_user",
+          agent: "review",
+          providerID: "provider",
+          modelID: "review-model",
+          error: { name: "APIError", data: { message: "Synthetic failure" } },
+          tokens: {
+            input: 1,
+            output: 2,
+            reasoning: 3,
+            cache: { read: 4, write: 5 },
+          },
+          time: { created: 1788163204000, completed: 1788163204500 },
+        },
+        parts: [
+          {
+            id: "prt_tool_error",
+            type: "tool",
+            callID: "call_error",
+            tool: "read",
+            state: {
+              status: "error",
+              input: { path: "missing.txt" },
+              error: "Synthetic tool failure",
+              time: { start: 1788163204000, end: 1788163204500 },
+            },
+          },
+        ],
+      },
+    ],
+  };
+  const parsed = P.parseJSON(JSON.stringify(exported, null, 2), "opencode-session.json"),
+    workspace = P.buildWorkspace([parsed]),
+    session = workspace.sessions[0];
+
+  assert.equal(workspace.warnings.length, 0);
+  assert.equal(workspace.sessions.length, 1);
+  assert.equal(session.id, "ses_synthetic");
+  assert.equal(session.platform, "OpenCode");
+  assert.equal(session.title, "Synthetic OpenCode session");
+  assert.equal(session.cwd, "/workspace/project");
+  assert.deepEqual(session.agents, ["plan", "build", "review"]);
+  assert.ok(session.models.includes("provider/root-model"));
+  assert.ok(session.models.includes("provider/prompt-model"));
+  assert.ok(session.models.includes("provider/assistant-model"));
+  assert.deepEqual(
+    session.events.slice(0, 4).map((event) => event.kind),
+    ["prompt", "thinking", "assistant", "tool"],
+  );
+  assert.equal(session.events[0].timestamp, "2026-08-31T08:00:01.000Z");
+  assert.equal(session.events[0].title, "Human prompt");
+  assert.equal(session.events[1].model, "provider/assistant-model");
+  assert.equal(session.events[1].agentId, "build");
+  assert.equal(session.events[2].parentUuid, "msg_user");
+
+  const successfulTool = session.events.find(
+      (event) => event.tool && event.tool.id === "call_success",
+    ),
+    failedTool = session.events.find(
+      (event) => event.tool && event.tool.id === "call_error",
+    ),
+    messageError = session.events.find((event) => event.title === "APIError");
+  assert.equal(successfulTool.tool.name, "bash");
+  assert.equal(successfulTool.tool.command, "npm test");
+  assert.equal(successfulTool.tool.status, "success");
+  assert.equal(successfulTool.tool.result, "all tests passed");
+  assert.equal(successfulTool.tool.durationMs, 250);
+  assert.equal(successfulTool.tool.resultSource, "opencode-session.json");
+  assert.equal(failedTool.tool.status, "error");
+  assert.equal(failedTool.tool.result, "Synthetic tool failure");
+  assert.equal(failedTool.isError, true);
+  assert.equal(messageError.text, "Synthetic failure");
+  assert.equal(messageError.isError, true);
+  assert.deepEqual(
+    {
+      input: session.stats.inputTokens,
+      output: session.stats.outputTokens,
+      reasoning: session.stats.reasoningTokens,
+      cacheRead: session.stats.cacheReadTokens,
+      cacheWrite: session.stats.cacheWriteTokens,
+    },
+    { input: 30, output: 20, reasoning: 7, cacheRead: 4, cacheWrite: 2 },
+  );
+  assert.equal(session.stats.tools, 2);
+  assert.equal(session.stats.errors, 2);
+  assert.equal(session.stats.events, session.events.length);
+  assert.equal(session.startTime, "2026-08-31T08:00:00.000Z");
+  assert.equal(session.endTime, "2026-08-31T08:01:00.000Z");
+});
+
+test("OpenCode token stats fall back to unique assistant messages", () => {
+  const exported = {
+    info: {
+      id: "ses_message_tokens",
+      title: "Message token fallback",
+      directory: "/workspace/project",
+      time: { created: 1788163200000, updated: 1788163201000 },
+    },
+    messages: [
+      {
+        info: {
+          id: "msg_assistant",
+          role: "assistant",
+          agent: "build",
+          modelID: "model",
+          providerID: "provider",
+          time: { created: 1788163200000 },
+          tokens: {
+            input: 5,
+            output: 3,
+            reasoning: 2,
+            cache: { read: 1, write: 4 },
+          },
+        },
+        parts: [
+          { id: "prt_a", type: "text", text: "A" },
+          { id: "prt_b", type: "text", text: "B" },
+        ],
+      },
+    ],
+  };
+  const session = P.buildWorkspace([
+    P.parseJSON(JSON.stringify(exported), "fallback.json"),
+  ]).sessions[0];
+  assert.equal(session.stats.inputTokens, 5);
+  assert.equal(session.stats.outputTokens, 3);
+  assert.equal(session.stats.reasoningTokens, 2);
+  assert.equal(session.stats.cacheReadTokens, 1);
+  assert.equal(session.stats.cacheWriteTokens, 4);
+});
+
 test("memory reads nested origin id and preserves source text", () => {
   const text = "---\nname: Note\ncontext:\n  originSessionId: abc\n---\nBody";
   const m = P.parseMemory(text, "n.md");
@@ -647,6 +878,57 @@ test("Codex history remains useful without rollout files", () => {
 });
 
 test(
+  "real OpenCode JSON exports normalize without direct database access",
+  { skip: !process.env.OPENCODE_SESSION_FIXTURES },
+  () => {
+    const root = path.resolve(process.env.OPENCODE_SESSION_FIXTURES),
+      files = [];
+    function collect(target) {
+      const stat = fs.statSync(target);
+      if (stat.isFile()) {
+        if (target.endsWith(".json")) files.push(target);
+        return;
+      }
+      for (const entry of fs.readdirSync(target, { withFileTypes: true })) {
+        const file = path.join(target, entry.name);
+        if (entry.isDirectory()) collect(file);
+        else if (entry.name.endsWith(".json")) files.push(file);
+      }
+    }
+    if (fs.existsSync(root)) collect(root);
+    const parsed = files
+        .map((file) =>
+          P.parseJSON(
+            fs.readFileSync(file, "utf8"),
+            path.relative(fs.statSync(root).isDirectory() ? root : path.dirname(root), file),
+          ),
+        )
+        .filter(
+          (file) =>
+            file.records[0] &&
+            file.records[0].raw &&
+            file.records[0].raw.info &&
+            Array.isArray(file.records[0].raw.messages),
+        ),
+      workspace = P.buildWorkspace(parsed);
+    assert.ok(parsed.length > 0);
+    assert.ok(workspace.sessions.length > 0);
+    assert.ok(workspace.sessions.every((session) => session.platform === "OpenCode"));
+    assert.ok(
+      workspace.sessions.every(
+        (session) => session.stats.events === session.events.length,
+      ),
+    );
+    for (const session of workspace.sessions)
+      for (const event of session.events) {
+        assert.equal(event.sessionId, session.id);
+        assert.ok(event.agentId);
+        assert.ok(event.source);
+      }
+  },
+);
+
+test(
   "real Codex fixtures normalize canonical items and suppress duplicate response records",
   { skip: !process.env.CODEX_SESSION_FIXTURES },
   () => {
@@ -772,5 +1054,269 @@ test(
         );
     assert.equal(w.warnings.length, 0);
     assert.ok(w.sessions.every((s) => s.stats.events === s.events.length));
+  },
+);
+
+test("Antigravity prefers full transcripts and normalizes Gemini events", () => {
+  const base = "/fixture/.gemini/antigravity-cli/brain/sample-session/.system_generated/logs",
+    fullSource = path.join(base, "transcript_full.jsonl"),
+    transcriptSource = path.join(base, "transcript.jsonl"),
+    chunkSource = path.join(base, "chunks/transcript_full/00000000.jsonl"),
+    full = [
+      {
+        type: "USER_INPUT",
+        status: "DONE",
+        created_at: "2026-09-20T01:00:00Z",
+        content: "Synthetic request",
+        agent_id: "main",
+        sessionTitle: "Synthetic Gemini chat",
+        model: "gemini-test-model",
+      },
+      {
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: "2026-09-20T01:00:01Z",
+        thinking: "Synthetic recorded reasoning",
+        content: "Synthetic assistant answer",
+        tool_calls: [
+          {
+            id: "call-1",
+            name: "run_command",
+            args: { CommandLine: "npm test", Cwd: "/fixture" },
+          },
+        ],
+      },
+      {
+        type: "RUN_COMMAND",
+        status: "DONE",
+        created_at: "2026-09-20T01:00:02Z",
+        content: "Synthetic command output",
+      },
+      {
+        type: "ERROR_MESSAGE",
+        status: "DONE",
+        created_at: "2026-09-20T01:00:03Z",
+        content: "Synthetic error",
+        error: "Synthetic error detail",
+      },
+    ],
+    parsed = [
+      P.parseJSONL(
+        JSON.stringify({ type: "USER_INPUT", content: "Duplicate transcript" }),
+        transcriptSource,
+      ),
+      P.parseJSONL(full.map(JSON.stringify).join("\n"), fullSource),
+      P.parseJSONL(
+        JSON.stringify({ type: "USER_INPUT", content: "Duplicate chunk" }),
+        chunkSource,
+      ),
+    ],
+    workspace = P.buildWorkspace(parsed),
+    session = workspace.sessions[0],
+    tool = session.events.find((event) => event.kind === "tool"),
+    error = session.events.find((event) => event.isError);
+
+  assert.equal(workspace.sessions.length, 1);
+  assert.equal(session.id, "sample-session");
+  assert.equal(session.platform, "Gemini (Antigravity)");
+  assert.equal(session.title, "Synthetic Gemini chat");
+  assert.deepEqual(session.models, ["gemini-test-model"]);
+  assert.deepEqual(session.agents, ["main"]);
+  assert.deepEqual(session.sources, [fullSource]);
+  assert.equal(session.events.filter((event) => event.kind === "prompt").length, 1);
+  assert.equal(session.events.find((event) => event.kind === "prompt").text, "Synthetic request");
+  assert.equal(session.events.find((event) => event.kind === "thinking").text, "Synthetic recorded reasoning");
+  assert.equal(session.events.find((event) => event.kind === "assistant").text, "Synthetic assistant answer");
+  assert.equal(session.events.length, 5);
+  assert.equal(tool.tool.command, "npm test");
+  assert.equal(tool.tool.status, "success");
+  assert.equal(tool.tool.result, "Synthetic command output");
+  assert.equal(tool.tool.resultSource, fullSource);
+  assert.equal(tool.tool.resultLine, 3);
+  assert.equal(tool.tool.durationMs, 1000);
+  assert.equal(error.kind, "system");
+  assert.equal(error.text, "Synthetic error");
+  assert.equal(error.isError, true);
+  assert.equal(session.events[0].timestamp, "2026-09-20T01:00:00.000Z");
+  assert.equal(session.stats.prompts, 1);
+  assert.equal(session.stats.assistant, 1);
+  assert.equal(session.stats.thinking, 1);
+  assert.equal(session.stats.tools, 1);
+  assert.equal(session.stats.errors, 1);
+});
+
+test("Antigravity falls back to transcript JSONL when full logs are absent", () => {
+  const base = "/fixture/.gemini/antigravity-cli/brain/transcript-only/.system_generated/logs",
+    transcriptSource = path.join(base, "transcript.jsonl"),
+    chunkSource = path.join(base, "chunks/transcript/00000000.jsonl"),
+    workspace = P.buildWorkspace([
+      P.parseJSONL(
+        JSON.stringify({
+          type: "USER_INPUT",
+          status: "DONE",
+          created_at: "2026-09-20T02:00:00Z",
+          content: "Synthetic canonical prompt",
+        }),
+        transcriptSource,
+      ),
+      P.parseJSONL(
+        JSON.stringify({
+          type: "USER_INPUT",
+          status: "DONE",
+          created_at: "2026-09-20T02:00:00Z",
+          content: "Synthetic duplicate chunk prompt",
+        }),
+        chunkSource,
+      ),
+    ]),
+    session = workspace.sessions[0];
+  assert.equal(session.events.length, 1);
+  assert.equal(session.events[0].text, "Synthetic canonical prompt");
+  assert.deepEqual(session.sources, [transcriptSource]);
+});
+
+test("Antigravity ASK_QUESTION results keep structured answers", () => {
+  const source =
+      "/fixture/.gemini/antigravity-cli/brain/questions/.system_generated/logs/transcript_full.jsonl",
+    question = "Which format should be used?",
+    questions = [
+      {
+        header: "Format",
+        question,
+        multiSelect: false,
+        options: [
+          { label: "JSON", description: "Machine readable" },
+          { label: "Markdown", description: "Readable" },
+        ],
+      },
+    ],
+    rows = [
+      {
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        created_at: "2026-09-20T03:00:00Z",
+        tool_calls: [
+          {
+            id: "ask-1",
+            name: "ask_question",
+            args: { questions: JSON.stringify(questions) },
+          },
+        ],
+      },
+      {
+        type: "ASK_QUESTION",
+        status: "DONE",
+        created_at: "2026-09-20T03:00:01Z",
+        content: JSON.stringify({ answers: { [question]: "JSON" } }),
+      },
+    ],
+    session = P.buildWorkspace([
+      P.parseJSONL(rows.map(JSON.stringify).join("\n"), source),
+    ]).sessions[0],
+    tool = session.events.find((event) => event.kind === "tool").tool;
+  assert.equal(tool.questionInteraction.state, "answered");
+  assert.equal(tool.questionInteraction.questions[0].answer, "JSON");
+  assert.deepEqual(
+    tool.questionInteraction.questions[0].options.map((option) => option.selected),
+    [true, false],
+  );
+  assert.equal(tool.resultSource, source);
+});
+
+test("Antigravity keeps a plain recorded answer for a single question", () => {
+  const source =
+      "/fixture/.gemini/antigravity-cli/brain/plain-answer/.system_generated/logs/transcript_full.jsonl",
+    rows = [
+      {
+        type: "PLANNER_RESPONSE",
+        created_at: "2026-09-20T03:10:00Z",
+        tool_calls: [
+          {
+            name: "ask_question",
+            args: {
+              questions: [{ question: "Continue?", options: [] }],
+            },
+          },
+        ],
+      },
+      {
+        type: "ASK_QUESTION",
+        status: "DONE",
+        created_at: "2026-09-20T03:10:01Z",
+        content: "Yes, continue.",
+      },
+    ],
+    tool = P.buildWorkspace([
+      P.parseJSONL(rows.map(JSON.stringify).join("\n"), source),
+    ]).sessions[0].events.find((event) => event.kind === "tool").tool;
+  assert.equal(tool.questionInteraction.state, "answered");
+  assert.equal(tool.questionInteraction.questions[0].answer, "Yes, continue.");
+});
+
+test(
+  "real Antigravity fixtures normalize aggregate transcripts without duplicates",
+  { skip: !process.env.GEMINI_SESSION_FIXTURES },
+  () => {
+    const root = path.resolve(process.env.GEMINI_SESSION_FIXTURES),
+      brainRoot =
+        path.basename(root) === "brain"
+          ? root
+          : path.basename(root) === "antigravity-cli"
+            ? path.join(root, "brain")
+            : path.basename(root) === ".system_generated"
+              ? path.dirname(path.dirname(root))
+              : path.join(root, "antigravity-cli", "brain"),
+      brainDirs = path.basename(brainRoot) === "brain" ? [brainRoot] : [],
+      files = [];
+    if (brainDirs.length) {
+      for (const entry of fs.readdirSync(brainRoot, { withFileTypes: true }))
+        if (entry.isDirectory()) brainDirs.push(path.join(brainRoot, entry.name));
+    } else if (fs.existsSync(brainRoot)) brainDirs.push(brainRoot);
+    for (const brainDir of brainDirs) {
+      const logs =
+        path.basename(brainDir) === "brain"
+          ? null
+          : path.join(brainDir, ".system_generated", "logs");
+      if (!logs || !fs.existsSync(logs)) continue;
+      for (const name of ["transcript_full.jsonl", "transcript.jsonl"]) {
+        const file = path.join(logs, name);
+        if (fs.existsSync(file)) files.push(file);
+      }
+      for (const variant of ["transcript_full", "transcript"]) {
+        const chunks = path.join(logs, "chunks", variant);
+        if (!fs.existsSync(chunks)) continue;
+        for (const entry of fs.readdirSync(chunks, { withFileTypes: true }))
+          if (entry.isFile() && entry.name.endsWith(".jsonl"))
+            files.push(path.join(chunks, entry.name));
+      }
+    }
+    const parsed = files.map((file) => {
+        const rel = path.relative(brainRoot, file).replace(/\\/g, "/");
+        return P.parseJSONL(
+          fs.readFileSync(file, "utf8"),
+          path.join("antigravity-cli", "brain", rel),
+        );
+      }),
+      workspace = P.buildWorkspace(parsed),
+      sessions = workspace.sessions;
+    assert.ok(files.length > 0);
+    assert.ok(parsed.some((file) => file.source.endsWith("transcript_full.jsonl")));
+    assert.ok(sessions.length > 0);
+    assert.equal(workspace.warnings.length, 0);
+    assert.ok(sessions.every((session) => session.platform === "Gemini (Antigravity)"));
+    assert.ok(sessions.every((session) => session.stats.events === session.events.length));
+    assert.ok(sessions.every((session) => session.events.every((event) => event.agentId)));
+    assert.ok(sessions.some((session) => session.stats.prompts > 0));
+    assert.ok(sessions.some((session) => session.stats.assistant > 0));
+    assert.ok(sessions.some((session) => session.stats.thinking > 0));
+    assert.ok(sessions.some((session) => session.stats.tools > 0));
+    for (const session of sessions) {
+      const transcriptSources = session.sources.filter((source) =>
+        /(?:^|\/)transcript(?:_full)?\.jsonl$/i.test(source),
+      );
+      assert.ok(transcriptSources.length <= 1);
+      if (transcriptSources.some((source) => source.endsWith("transcript_full.jsonl")))
+        assert.ok(!transcriptSources.some((source) => source.endsWith("transcript.jsonl")));
+    }
   },
 );

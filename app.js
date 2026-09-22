@@ -48,6 +48,10 @@
       .toLowerCase();
     if (evidence.includes(".codex") || /\b(?:gpt|o[134])-/.test(evidence))
       return "Codex";
+    if (evidence.includes(".gemini") || evidence.includes("antigravity"))
+      return "Gemini";
+    if (evidence.includes(".opencode") || evidence.includes("opencode"))
+      return "OpenCode";
     if (evidence.includes(".claude") || evidence.includes("claude"))
       return "Claude Code";
     return "";
@@ -102,10 +106,20 @@
     const source = file.webkitRelativePath || file.name,
       n = file.name.toLowerCase(),
       sourceParts = source.replace(/\\/g, "/").split("/"),
+      lowerSourceParts = sourceParts.map((part) => part.toLowerCase()),
       codexAt = sourceParts.findIndex(
         (part) => part.toLowerCase() === ".codex",
-      );
-    if (/\.meta\.json$/i.test(n) || (!/\.jsonl$/i.test(n) && !/\.md$/i.test(n)))
+      ),
+      geminiAt = lowerSourceParts.indexOf(".gemini"),
+      openCodeAt = lowerSourceParts.indexOf(".opencode"),
+      looksLikeGeminiTranscript =
+        lowerSourceParts.includes(".system_generated") &&
+        lowerSourceParts.includes("logs") &&
+        /^transcript.*\.jsonl$/i.test(n);
+    if (
+      /\.meta\.json$/i.test(n) ||
+      (!/\.jsonl$/i.test(n) && !/\.json$/i.test(n) && !/\.md$/i.test(n))
+    )
       return { skipped: true, source };
     if (/\.jsonl$/i.test(n) && codexAt >= 0) {
       const belowCodex = sourceParts.slice(codexAt + 1),
@@ -115,6 +129,15 @@
             (n === "history.jsonl" || n === "session_index.jsonl"));
       if (!supportedCodexLog) return { skipped: true, source };
     }
+    if (
+      (/\.(?:jsonl|json)$/i.test(n) && geminiAt >= 0) ||
+      looksLikeGeminiTranscript
+    ) {
+      if (!(looksLikeGeminiTranscript && n === "transcript_full.jsonl"))
+        return { skipped: true, source };
+    }
+    if (/\.(?:jsonl|json)$/i.test(n) && openCodeAt >= 0)
+      return { skipped: true, source };
     if (/\.md$/i.test(n) && file.webkitRelativePath) {
       const directories = file.webkitRelativePath
         .replace(/\\/g, "/")
@@ -127,9 +150,13 @@
     const raw = await file.text(),
       p = window.SessionParser;
     if (!p) throw Error("parser.js did not load");
-    return /\.md$/i.test(n)
-      ? { memory: p.parseMemory(raw, source), source }
-      : { parsed: p.parseJSONL(raw, source), source };
+    if (/\.md$/i.test(n))
+      return { memory: p.parseMemory(raw, source), source };
+    if (/\.json$/i.test(n)) {
+      if (!p.parseJSON) throw Error("JSON session parser did not load");
+      return { parsed: p.parseJSON(raw, source), source };
+    }
+    return { parsed: p.parseJSONL(raw, source), source };
   }
   function rebuild(preferred) {
     state.workspace = window.SessionParser.buildWorkspace(
@@ -305,6 +332,7 @@
       ["Errors", st.errors],
       ["Recorded input tokens", st.inputTokens],
       ["Recorded output tokens", st.outputTokens],
+      ["Recorded reasoning tokens", st.reasoningTokens],
       ["Cache read tokens", st.cacheReadTokens],
       ["Cache write tokens", st.cacheWriteTokens],
     ];

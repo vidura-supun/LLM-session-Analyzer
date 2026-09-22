@@ -8,7 +8,7 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'"
     />
-    <title>LLM session Analyzer — Claude Code and Codex workbench</title>
+    <title>LLM session Analyzer — multi-agent session workbench</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -27,7 +27,7 @@
             id="file-input"
             type="file"
             multiple
-            accept=".jsonl,.md"
+            accept=".jsonl,.json,.md"
             aria-label="Select session logs and memories"
             hidden
           />
@@ -59,7 +59,7 @@
           aria-label="Drop session files here or activate to import"
         >
           <span aria-hidden="true">↧</span><span>Drop files here</span
-          ><small>.jsonl · memory .md</small>
+          ><small>.jsonl · .json · memory .md</small>
         </div>
         <p
           id="status-live"
@@ -98,9 +98,9 @@
           <div class="empty-orbit" aria-hidden="true">◌</div>
           <h1>Make a session legible.</h1>
           <p>
-            Import Claude Code or Codex JSONL session logs, plus Markdown
-            memories, to inspect prompts, tools, branches, and recorded usage
-            in one quiet workspace.
+            Import Claude Code, Codex, Gemini, or OpenCode session logs, plus
+            Markdown memories, to inspect prompts, tools, branches, and
+            recorded usage in one quiet workspace.
           </p>
           <div class="empty-actions">
             <button

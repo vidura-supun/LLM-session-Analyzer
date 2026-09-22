@@ -66,6 +66,33 @@
     };
   }
 
+  function parseJSON(text, sourceName) {
+    text = String(text == null ? "" : text).replace(/^\uFEFF/, "");
+    var source = String(sourceName || "import.json"),
+      lines = text.split(/\r?\n/),
+      records = [],
+      warnings = [];
+    try {
+      var raw = JSON.parse(text);
+      if (!object(raw)) throw new Error("JSON value is not an object");
+      if (!openCodeExport(raw))
+        throw new Error("Unsupported JSON session export");
+      records.push({ raw: raw, line: 1 });
+    } catch (e) {
+      warnings.push({
+        source: source,
+        line: 1,
+        message: e.message || "Malformed JSON",
+      });
+    }
+    return {
+      source: source,
+      records: records,
+      warnings: warnings,
+      totalLines: lines.length,
+    };
+  }
+
   function yamlScalar(s) {
     s = s.trim();
     if (
@@ -243,6 +270,216 @@
         ? "answered"
         : "unanswered";
   }
+  function antigravitySourceInfo(source, records) {
+    var parts = String(source || "")
+      .replace(/\\/g, "/")
+      .split("/")
+      .filter(Boolean),
+      lower = parts.map(function (part) {
+        return part.toLowerCase();
+      }),
+      brainAt = lower.lastIndexOf("brain"),
+      systemAt = lower.lastIndexOf(".system_generated"),
+      logsAt = lower.lastIndexOf("logs"),
+      name = lower[parts.length - 1],
+      relative = logsAt >= 0 ? lower.slice(logsAt + 1) : [],
+      geminiRecord =
+        Array.isArray(records) &&
+        records.some(function (entry) {
+          return (
+            object(entry && entry.raw) &&
+            /^(USER_INPUT|PLANNER_RESPONSE|GENERIC|SYSTEM_MESSAGE|ERROR_MESSAGE|EPHEMERAL_MESSAGE|CHECKPOINT|CONVERSATION_HISTORY|VIEW_FILE|CODE_ACTION|INVOKE_SUBAGENT|SEARCH_WEB|LIST_DIRECTORY|RUN_COMMAND|READ_URL_CONTENT|GREP_SEARCH|ASK_QUESTION)$/.test(
+              String(entry.raw.type || "").toUpperCase(),
+            )
+          );
+        }),
+      hasLogDirectory =
+        logsAt >= 0 &&
+        lower[logsAt - 1] === ".system_generated" &&
+        (lower.indexOf("antigravity-cli") >= 0 || name.indexOf("transcript") >= 0),
+      hasCanonicalName =
+        name === "transcript_full.jsonl" || name === "transcript.jsonl",
+      rank = 0,
+      chunk = false;
+    if (
+      (!hasLogDirectory && !hasCanonicalName && !geminiRecord) ||
+      (brainAt >= 0 && !parts[brainAt + 1])
+    )
+      return null;
+    if (name === "transcript_full.jsonl") rank = 4;
+    else if (name === "transcript.jsonl") rank = 3;
+    else if (
+      relative.length === 3 &&
+      relative[0] === "chunks" &&
+      relative[2].endsWith(".jsonl") &&
+      relative[1] === "transcript_full"
+    ) {
+      rank = 2;
+      chunk = true;
+    } else if (
+      relative.length === 3 &&
+      relative[0] === "chunks" &&
+      relative[2].endsWith(".jsonl") &&
+      relative[1] === "transcript"
+    ) {
+      rank = 1;
+      chunk = true;
+    }
+    if (!rank && geminiRecord) rank = 4;
+    if (!rank) return null;
+    var sessionId =
+      brainAt >= 0
+        ? parts[brainAt + 1]
+        : systemAt > 0
+          ? parts[systemAt - 1]
+          : "";
+    if (!sessionId || sessionId === "logs") {
+      var explicit = Array.isArray(records)
+        ? records.find(function (entry) {
+            var raw = entry && entry.raw;
+            return object(raw) && (raw.sessionId || raw.session_id);
+          })
+        : null;
+      sessionId = explicit
+        ? String(explicit.raw.sessionId || explicit.raw.session_id)
+        : parts.length > 1 && parts[parts.length - 2] !== "logs"
+          ? parts[parts.length - 2]
+          : fileSession(source);
+    }
+    return { sessionId: sessionId, rank: rank, chunk: chunk };
+  }
+  function antigravitySelectedFiles(parsedFiles) {
+    var groups = new Map(),
+      selected = new Set();
+    parsedFiles.forEach(function (pf, index) {
+      if (!pf) return;
+      var info = antigravitySourceInfo(pf.source, pf.records);
+      if (!info) return;
+      var group = groups.get(info.sessionId) || { rank: 0, candidates: [] };
+      if (info.rank > group.rank) {
+        group.rank = info.rank;
+        group.candidates = [index];
+      } else if (info.rank === group.rank) group.candidates.push(index);
+      groups.set(info.sessionId, group);
+    });
+    groups.forEach(function (group) {
+      var seen = new Set();
+      group.candidates.forEach(function (index) {
+        var pf = parsedFiles[index],
+          source = String((pf && pf.source) || "");
+        if (group.rank >= 3 && seen.size) return;
+        if (seen.has(source)) return;
+        seen.add(source);
+        selected.add(index);
+      });
+    });
+    return selected;
+  }
+  function antigravityTimestamp(value) {
+    if (!value) return null;
+    var date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+  }
+  function antigravityText(value) {
+    if (value == null) return "";
+    if (typeof value === "string") return value;
+    if (Array.isArray(value))
+      return value
+        .map(function (part) {
+          if (typeof part === "string") return part;
+          if (!object(part)) return "";
+          if (part.text !== undefined) return string(part.text);
+          if (part.content !== undefined) return antigravityText(part.content);
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n");
+    if (object(value)) {
+      if (value.text !== undefined) return string(value.text);
+      if (value.content !== undefined) return antigravityText(value.content);
+    }
+    return string(value);
+  }
+  function antigravityToolType(name) {
+    var value = String(name || "").toLowerCase(),
+      aliases = {
+        run_command: "RUN_COMMAND",
+        search_web: "SEARCH_WEB",
+        view_file: "VIEW_FILE",
+        write_to_file: "CODE_ACTION",
+        replace_file_content: "CODE_ACTION",
+        invoke_subagent: "INVOKE_SUBAGENT",
+        list_dir: "LIST_DIRECTORY",
+        read_url_content: "READ_URL_CONTENT",
+        grep_search: "GREP_SEARCH",
+        ask_question: "ASK_QUESTION",
+        send_message: "SEND_MESSAGE",
+        define_subagent: "DEFINE_SUBAGENT",
+        manage_subagents: "MANAGE_SUBAGENTS",
+        schedule: "SCHEDULE",
+        manage_task: "MANAGE_TASK",
+        generate_image: "GENERATE_IMAGE",
+        find_by_name: "FIND_BY_NAME",
+        mcp_chrome_devtools_list_pages: "MCP_CHROME_DEVTOOLS_LIST_PAGES",
+        mcp_chrome_devtools_new_page: "MCP_CHROME_DEVTOOLS_NEW_PAGE",
+      };
+    return aliases[value] || value.replace(/[^a-z0-9]+/g, "_").toUpperCase();
+  }
+  function antigravityToolName(type) {
+    var names = {
+      RUN_COMMAND: "run_command",
+      SEARCH_WEB: "search_web",
+      VIEW_FILE: "view_file",
+      CODE_ACTION: "code_action",
+      INVOKE_SUBAGENT: "invoke_subagent",
+      LIST_DIRECTORY: "list_dir",
+      READ_URL_CONTENT: "read_url_content",
+      GREP_SEARCH: "grep_search",
+      ASK_QUESTION: "ask_question",
+      SEND_MESSAGE: "send_message",
+      DEFINE_SUBAGENT: "define_subagent",
+      MANAGE_SUBAGENTS: "manage_subagents",
+      SCHEDULE: "schedule",
+      MANAGE_TASK: "manage_task",
+      GENERATE_IMAGE: "generate_image",
+      FIND_BY_NAME: "find_by_name",
+      MCP_CHROME_DEVTOOLS_LIST_PAGES: "mcp_chrome_devtools_list_pages",
+      MCP_CHROME_DEVTOOLS_NEW_PAGE: "mcp_chrome_devtools_new_page",
+    };
+    return names[String(type || "").toUpperCase()] || "";
+  }
+  function antigravityToolStatus(status, isError) {
+    var value = String(status || "").toLowerCase();
+    if (isError || /error|fail|cancel|reject/.test(value)) return "error";
+    if (/running|pending|start|progress/.test(value)) return "pending";
+    return "success";
+  }
+  function antigravityCommand(input) {
+    if (!object(input)) return "";
+    return string(
+      input.CommandLine ||
+        input.command ||
+        input.cmd ||
+        input.Instruction ||
+        input.Prompt ||
+        input.Message ||
+        input.Description ||
+        input.query ||
+        input.Query ||
+        input.toolSummary ||
+        input.toolAction ||
+        "",
+    );
+  }
+  function antigravityQuestionInput(input) {
+    if (!object(input) || typeof input.questions !== "string") return input;
+    try {
+      var questions = JSON.parse(input.questions);
+      if (Array.isArray(questions))
+        return Object.assign({}, input, { questions: questions });
+    } catch (_) {}
+    return input;
+  }
   function codexPayload(raw) {
     return object(raw) && object(raw.payload) ? raw.payload : {};
   }
@@ -305,6 +542,297 @@
         "agent",
     );
   }
+  function openCodeExport(raw) {
+    return (
+      object(raw) &&
+      object(raw.info) &&
+      Array.isArray(raw.messages) &&
+      raw.messages.every(function (message) {
+        return (
+          object(message) &&
+          object(message.info) &&
+          Array.isArray(message.parts)
+        );
+      })
+    );
+  }
+  function openCodeTimestamp(value) {
+    if (value == null || value === "") return null;
+    if (typeof value === "string" && Number.isFinite(Date.parse(value)))
+      return new Date(Date.parse(value)).toISOString();
+    var n = Number(value);
+    if (!Number.isFinite(n)) return null;
+    if (Math.abs(n) < 1e12) n *= 1000;
+    var d = new Date(n);
+    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+  }
+  function openCodeModel(info) {
+    if (!object(info)) return "";
+    var model = object(info.model) ? info.model : null,
+      provider = (model && model.providerID) || info.providerID || "",
+      id = (model && (model.modelID || model.id)) || info.modelID || "";
+    return [provider, id].filter(Boolean).join("/");
+  }
+  function openCodeErrorText(error) {
+    if (error == null) return "";
+    if (typeof error === "string") return error;
+    if (object(error.data) && error.data.message != null)
+      return string(error.data.message);
+    if (error.message != null) return string(error.message);
+    if (error.name) return String(error.name);
+    return string(error);
+  }
+  function openCodeCommand(input) {
+    if (!object(input)) return "";
+    var value =
+      input.command != null
+        ? input.command
+        : input.cmd != null
+          ? input.cmd
+          : input.script != null
+            ? input.script
+            : input.query != null
+              ? input.query
+              : "";
+    return Array.isArray(value) ? value.map(string).join(" ") : string(value);
+  }
+  function openCodeToolStatus(status) {
+    status = String(status || "").toLowerCase();
+    if (/error|fail|cancel|reject/.test(status)) return "error";
+    if (/complete|success|done/.test(status)) return "success";
+    return "pending";
+  }
+  function openCodeTokens(tokens) {
+    tokens = object(tokens) ? tokens : {};
+    var cache = object(tokens.cache) ? tokens.cache : {};
+    return {
+      inputTokens: number(tokens.input),
+      outputTokens: number(tokens.output),
+      reasoningTokens: number(tokens.reasoning),
+      cacheReadTokens: number(cache.read),
+      cacheWriteTokens: number(cache.write),
+    };
+  }
+  function addOpenCodeTokens(target, usage) {
+    target.inputTokens += usage.inputTokens;
+    target.outputTokens += usage.outputTokens;
+    target.reasoningTokens += usage.reasoningTokens;
+    target.cacheReadTokens += usage.cacheReadTokens;
+    target.cacheWriteTokens += usage.cacheWriteTokens;
+  }
+  function openCodePartText(part) {
+    if (!object(part)) return string(part);
+    if (part.text != null) return string(part.text);
+    if (part.content != null) return string(part.content);
+    if (part.description != null) return string(part.description);
+    if (part.prompt != null) return string(part.prompt);
+    return string(part);
+  }
+  function openCodePartTitle(part, kind) {
+    var type = String((part && part.type) || "");
+    if (kind === "prompt") return "Human prompt";
+    if (kind === "assistant") return "Assistant";
+    if (kind === "thinking") return "Thinking";
+    if (type === "compaction") return "Context compacted";
+    if (type === "step-start") return "Step started";
+    if (type === "step-finish") return "Step finished";
+    if (type === "retry") return "Retry";
+    if (type === "file") return "File attachment";
+    if (type === "patch") return "Patch";
+    if (type === "snapshot") return "Snapshot";
+    if (type === "agent") return "Agent";
+    return type || "OpenCode event";
+  }
+  function openCodePartTimestamp(part, info) {
+    var partTime = object(part && part.time)
+      ? part.time
+      : object(part && part.state) && object(part.state.time)
+        ? part.state.time
+        : {};
+    return openCodeTimestamp(
+      partTime.start != null
+        ? partTime.start
+        : partTime.created != null
+          ? partTime.created
+          : object(info && info.time)
+            ? info.time.created
+            : null,
+    );
+  }
+  function addOpenCodeExport(raw, source, fileIndex, session, nextSeq) {
+    var info = raw.info,
+      sid = String(info.id || fileSession(source)),
+      s = session(sid),
+      sessionAgent = String(info.agent || "main"),
+      sessionModel = openCodeModel(info);
+    s.platform = "OpenCode";
+    if (s.sources.indexOf(source) < 0) s.sources.push(source);
+    if (info.title) s._titles.push(String(info.title));
+    if (!s.cwd && info.directory) s.cwd = String(info.directory);
+    if (sessionAgent && s.agents.indexOf(sessionAgent) < 0)
+      s.agents.push(sessionAgent);
+    if (sessionModel && s.models.indexOf(sessionModel) < 0)
+      s.models.push(sessionModel);
+    if (object(info.time)) {
+      [info.time.created, info.time.updated].forEach(function (value) {
+        var timestamp = openCodeTimestamp(value);
+        if (timestamp)
+          s._times.push({ value: timestamp, ms: Date.parse(timestamp) });
+      });
+    }
+    if (object(info.tokens)) s._openCodeSessionTokens = openCodeTokens(info.tokens);
+    raw.messages.forEach(function (message, messageIndex) {
+      var messageInfo = message.info,
+        role = String(messageInfo.role || "").toLowerCase(),
+        agent = String(messageInfo.agent || sessionAgent || "main"),
+        model = openCodeModel(messageInfo) || sessionModel,
+        messageTimestamp = openCodePartTimestamp(null, messageInfo),
+        parts = message.parts;
+      if (s.agents.indexOf(agent) < 0) s.agents.push(agent);
+      if (model && s.models.indexOf(model) < 0) s.models.push(model);
+      if (messageTimestamp)
+        s._times.push({
+          value: messageTimestamp,
+          ms: Date.parse(messageTimestamp),
+        });
+      if (role === "assistant" && object(messageInfo.tokens)) {
+        if (!s._openCodeMessageTokens) s._openCodeMessageTokens = new Map();
+        s._openCodeMessageTokens.set(
+          String(messageInfo.id || messageIndex),
+          openCodeTokens(messageInfo.tokens),
+        );
+      }
+      parts.forEach(function (part, partIndex) {
+        if (!object(part)) part = { type: "text", text: string(part) };
+        var type = String(part.type || "").toLowerCase(),
+          kind = "system",
+          title,
+          text = openCodePartText(part),
+          tool = null,
+          state = object(part.state) ? part.state : {},
+          partTimestamp = openCodePartTimestamp(part, messageInfo),
+          isError = type === "retry";
+        if (type === "text")
+          kind = role === "user" ? "prompt" : role === "assistant" ? "assistant" : "system";
+        else if (type === "reasoning") kind = "thinking";
+        else if (type === "tool") {
+          kind = "tool";
+          title = String(part.tool || state.title || "Tool call");
+          var status = openCodeToolStatus(state.status),
+            start = openCodeTimestamp(object(state.time) ? state.time.start : null),
+            end = openCodeTimestamp(object(state.time) ? state.time.end : null),
+            duration = start && end ? Date.parse(end) - Date.parse(start) : null;
+          tool = {
+            id: String(part.callID || part.id || ""),
+            name: String(part.tool || "Unknown tool"),
+            input: object(state.input) ? state.input : {},
+            command: openCodeCommand(state.input),
+            status: status,
+            result:
+              status === "error"
+                ? openCodeErrorText(state.error)
+                : string(state.output || ""),
+            resultSource: status === "pending" ? null : source,
+            resultLine: status === "pending" ? null : 1,
+            resultRaw: status === "pending" ? null : message,
+            durationMs:
+              duration != null && Number.isFinite(duration) && duration >= 0
+                ? duration
+                : null,
+            questionInteraction: null,
+          };
+          text = tool.command;
+          isError = status === "error";
+        } else if (type === "subtask") {
+          kind = "tool";
+          title = "Subtask";
+          tool = {
+            id: String(part.id || ""),
+            name: String(part.agent || "Subtask"),
+            input: {
+              prompt: part.prompt || "",
+              description: part.description || "",
+            },
+            command: string(part.command || part.prompt || ""),
+            status: "success",
+            result: string(part.description || ""),
+            resultSource: source,
+            resultLine: 1,
+            resultRaw: message,
+            durationMs: null,
+            questionInteraction: null,
+          };
+          text = tool.command;
+        }
+        title = title || openCodePartTitle(part, kind);
+        var event = {
+          id:
+            source +
+            ":1:" +
+            String(messageInfo.id || messageIndex) +
+            ":" +
+            String(part.id || partIndex),
+          kind: kind,
+          title: title,
+          text: text,
+          timestamp: partTimestamp || messageTimestamp,
+          sessionId: sid,
+          agentId: agent,
+          source: source,
+          line: 1,
+          uuid: part.id || messageInfo.id || null,
+          parentUuid: messageInfo.parentID || null,
+          model: model || null,
+          isError: isError,
+          raw: message,
+          _seq: nextSeq(),
+          _file: fileIndex,
+        };
+        if (tool) event.tool = tool;
+        if (event.timestamp)
+          s._times.push({
+            value: event.timestamp,
+            ms: Date.parse(event.timestamp),
+          });
+        s.events.push(event);
+      });
+      if (messageInfo.error) {
+        var errorText = openCodeErrorText(messageInfo.error),
+          errorEvent = {
+            id:
+              source +
+              ":1:" +
+              String(messageInfo.id || messageIndex) +
+              ":error",
+            kind: "system",
+            title: String(messageInfo.error.name || "Assistant error"),
+            text: errorText || "Assistant error",
+            timestamp: openCodeTimestamp(
+              object(messageInfo.time)
+                ? messageInfo.time.completed || messageInfo.time.created
+                : null,
+            ),
+            sessionId: sid,
+            agentId: agent,
+            source: source,
+            line: 1,
+            uuid: messageInfo.id || null,
+            parentUuid: messageInfo.parentID || null,
+            model: model || null,
+            isError: true,
+            raw: message,
+            _seq: nextSeq(),
+            _file: fileIndex,
+          };
+        if (errorEvent.timestamp)
+          s._times.push({
+            value: errorEvent.timestamp,
+            ms: Date.parse(errorEvent.timestamp),
+          });
+        s.events.push(errorEvent);
+      }
+    });
+  }
   function buildWorkspace(parsedFiles, memories) {
     parsedFiles = Array.isArray(parsedFiles) ? parsedFiles : [];
     memories = Array.isArray(memories) ? memories : [];
@@ -314,6 +842,10 @@
       pendingResults = [],
       toolCalls = new Map(),
       codexUsages = new Map(),
+      antigravityFiles = antigravitySelectedFiles(parsedFiles),
+      antigravityCalls = new Map(),
+      antigravityResults = [],
+      antigravitySeen = new Map(),
       historyRows = [],
       indexRows = [];
     function session(id) {
@@ -339,18 +871,22 @@
     }
     parsedFiles.forEach(function (pf, fileIndex) {
       if (!pf || !Array.isArray(pf.records)) return;
+      var source = String(pf.source || "import.jsonl"),
+        sourceAgent = inferredAgent(source),
+        antigravityInfo = antigravitySourceInfo(source, pf.records);
+      if (antigravityInfo && !antigravityFiles.has(fileIndex)) return;
       if (Array.isArray(pf.warnings))
         warnings.push.apply(warnings, pf.warnings);
-      var source = String(pf.source || "import.jsonl"),
-        sourceAgent = inferredAgent(source);
       var sourceBase = basename(source).toLowerCase(),
         isHistory = sourceBase === "history.jsonl",
         isIndex = sourceBase === "session_index.jsonl",
         codexMeta = null,
-        isCodex = false;
+        isCodex = false,
+        openCodeRecords = [];
       pf.records.forEach(function (entry) {
         var raw = entry && entry.raw;
         if (!object(raw)) return;
+        if (openCodeExport(raw)) openCodeRecords.push(raw);
         if (
           raw.type === "session_meta" ||
           raw.type === "event_msg" ||
@@ -363,6 +899,166 @@
         if (raw.type === "session_meta" && object(raw.payload) && !codexMeta)
           codexMeta = raw.payload;
       });
+      if (openCodeRecords.length) {
+        openCodeRecords.forEach(function (raw) {
+          addOpenCodeExport(raw, source, fileIndex, session, function () {
+            return seq++;
+          });
+        });
+        return;
+      }
+      if (antigravityInfo) {
+        var antigravityId = antigravityInfo.sessionId,
+          antigravitySession = session(antigravityId),
+          seenForSession = antigravitySeen.get(antigravityId) || new Set();
+        antigravitySeen.set(antigravityId, seenForSession);
+        antigravitySession.platform = "Gemini (Antigravity)";
+        if (antigravitySession.sources.indexOf(source) < 0)
+          antigravitySession.sources.push(source);
+        pf.records.forEach(function (entry) {
+          var raw = entry && entry.raw;
+          if (!object(raw)) return;
+          var dedupeKey = JSON.stringify(raw);
+          if (seenForSession.has(dedupeKey)) return;
+          seenForSession.add(dedupeKey);
+          var line = entry.line,
+            sid = String(raw.sessionId || raw.session_id || antigravityId),
+            agent = String(
+              raw.agentId || raw.agent_id || raw.agentName || raw.agent_name || "main",
+            ),
+            s = session(sid),
+            type = String(raw.type || "UNKNOWN").toUpperCase(),
+            timestamp = antigravityTimestamp(raw.created_at || raw.timestamp),
+            model = String(raw.model || raw.model_name || raw.model_id || ""),
+            explicitTitle = raw.sessionTitle || raw.session_title || raw.title || "";
+          s.platform = "Gemini (Antigravity)";
+          if (s.sources.indexOf(source) < 0) s.sources.push(source);
+          if (s.agents.indexOf(agent) < 0) s.agents.push(agent);
+          if (explicitTitle) s._titles.push(String(explicitTitle));
+          if (model && s.models.indexOf(model) < 0) s.models.push(model);
+          if (timestamp)
+            s._times.push({ value: timestamp, ms: Date.parse(timestamp) });
+          function addEvent(kind, title, text, detail) {
+            detail = detail || {};
+            var event = {
+              id: source + ":" + line + ":" + (detail.index || 0),
+              kind: kind,
+              title: title,
+              text: text,
+              timestamp: timestamp,
+              sessionId: sid,
+              agentId: agent,
+              source: source,
+              line: line,
+              uuid: detail.uuid || raw.uuid || raw.id || null,
+              parentUuid: raw.parentUuid || raw.parent_uuid || null,
+              model: model || null,
+              isError: !!detail.isError,
+              raw: raw,
+              _seq: seq++,
+              _file: fileIndex,
+            };
+            if (detail.tool) event.tool = detail.tool;
+            s.events.push(event);
+            return event;
+          }
+          if (type === "USER_INPUT") {
+            var prompt = antigravityText(raw.content);
+            if (prompt)
+              addEvent(
+                "prompt",
+                agent === "main" ? "Human prompt" : "Agent prompt",
+                prompt,
+              );
+            return;
+          }
+          if (type === "PLANNER_RESPONSE") {
+            if (typeof raw.thinking === "string" && raw.thinking.trim())
+              addEvent("thinking", "Thinking", raw.thinking, { index: 0 });
+            var answer = antigravityText(raw.content),
+              itemIndex = 1;
+            if (answer.trim())
+              addEvent("assistant", "Assistant", answer, { index: itemIndex++ });
+            (Array.isArray(raw.tool_calls) ? raw.tool_calls : []).forEach(
+              function (call) {
+                if (!object(call)) return;
+                var name = String(call.name || "Tool call"),
+                  input = antigravityQuestionInput(
+                    object(call.args) ? call.args : {},
+                  ),
+                  toolType = antigravityToolType(name),
+                  toolId = String(call.id || call.call_id || ""),
+                  tool = {
+                    id: toolId,
+                    name: name,
+                    input: input,
+                    command: antigravityCommand(input),
+                    status: "pending",
+                    result: "",
+                    resultSource: null,
+                    resultLine: null,
+                    resultRaw: null,
+                    durationMs: null,
+                    questionInteraction:
+                      name.toLowerCase() === "ask_question"
+                        ? questionInteraction(input)
+                        : null,
+                  },
+                  callEvent = addEvent(
+                    "tool",
+                    tool.questionInteraction
+                      ? "Questions for user"
+                      : name.replace(/_/g, " "),
+                    tool.command,
+                    { index: itemIndex++, uuid: toolId, tool: tool },
+                  ),
+                  key = sid + "\u0000" + agent + "\u0000" + toolType,
+                  queue = antigravityCalls.get(key) || [];
+                queue.push(callEvent);
+                antigravityCalls.set(key, queue);
+              },
+            );
+            if (!answer.trim() && !(typeof raw.thinking === "string" && raw.thinking.trim()) && !raw.tool_calls)
+              addEvent("system", "Planner response", "Response content was not recorded.");
+            return;
+          }
+          var resultName = antigravityToolName(type);
+          if (resultName) {
+            var resultEvent = addEvent(
+                "result",
+                "Tool result: " + resultName.replace(/_/g, " "),
+                antigravityText(raw.content),
+                { isError: !!raw.error || type === "ERROR_MESSAGE" },
+              );
+            antigravityResults.push({
+              event: resultEvent,
+              toolType: type,
+              error: !!raw.error || /error/.test(String(raw.status || "").toLowerCase()),
+            });
+            return;
+          }
+          var error =
+            type === "ERROR_MESSAGE" ||
+            !!raw.error ||
+            /error|fail|cancel|reject/.test(String(raw.status || "").toLowerCase()),
+            labels = {
+              SYSTEM_MESSAGE: "System message",
+              ERROR_MESSAGE: "Error",
+              CHECKPOINT: "Checkpoint",
+              CONVERSATION_HISTORY: "Conversation history",
+              EPHEMERAL_MESSAGE: "Ephemeral message",
+              GENERIC: "Antigravity message",
+            },
+            label = labels[type] || type.replace(/_/g, " ").toLowerCase();
+          addEvent(
+            "system",
+            label,
+            antigravityText(raw.content) || antigravityText(raw.error),
+            { isError: error },
+          );
+        });
+        return;
+      }
       if (isHistory || isIndex) {
         pf.records.forEach(function (entry) {
           if (!object(entry.raw)) return;
@@ -933,6 +1629,87 @@
         });
       });
     });
+    antigravityCalls.forEach(function (queue) {
+      queue.sort(function (left, right) {
+        return (
+          (Date.parse(left.timestamp) || 0) -
+            (Date.parse(right.timestamp) || 0) ||
+          left._seq - right._seq
+        );
+      });
+    });
+    antigravityResults.sort(function (left, right) {
+      return (
+        (Date.parse(left.event.timestamp) || 0) -
+          (Date.parse(right.event.timestamp) || 0) ||
+        left.event._seq - right.event._seq
+      );
+    });
+    antigravityResults.forEach(function (pending) {
+      var resultEvent = pending.event,
+        key =
+          resultEvent.sessionId +
+          "\u0000" +
+          resultEvent.agentId +
+          "\u0000" +
+          pending.toolType,
+        queue = antigravityCalls.get(key),
+        call = queue && queue.shift();
+      if (!call) return;
+      var raw = resultEvent.raw,
+        status = antigravityToolStatus(
+          raw.status,
+          pending.error || resultEvent.isError,
+        );
+      call.tool.result =
+        resultEvent.text || antigravityText(raw.error || raw.output || "");
+      call.tool.status = status;
+      call.tool.resultSource = resultEvent.source;
+      call.tool.resultLine = resultEvent.line;
+      call.tool.resultRaw = raw;
+      call.isError = status === "error";
+      if (call.tool.questionInteraction) {
+        var structuredQuestionResult = object(raw.toolUseResult)
+          ? raw.toolUseResult
+          : null;
+        if (!structuredQuestionResult && resultEvent.text) {
+          try {
+            var parsedQuestionResult = JSON.parse(resultEvent.text);
+            if (object(parsedQuestionResult))
+              structuredQuestionResult = parsedQuestionResult;
+          } catch (_) {}
+        }
+        applyQuestionResult(
+          call.tool,
+          structuredQuestionResult
+            ? { toolUseResult: structuredQuestionResult }
+            : { toolUseResult: raw.toolUseResult },
+          call.isError,
+        );
+        if (
+          !call.isError &&
+          call.tool.questionInteraction.state === "unanswered" &&
+          call.tool.questionInteraction.questions.length === 1 &&
+          resultEvent.text.trim()
+        ) {
+          var recordedQuestion = call.tool.questionInteraction.questions[0],
+            recordedAnswer = resultEvent.text.trim();
+          recordedQuestion.answer = recordedAnswer;
+          call.tool.questionInteraction.answers[recordedQuestion.question] =
+            recordedAnswer;
+          call.tool.questionInteraction.state = "answered";
+        }
+      }
+      if (!call.tool.durationMs && call.timestamp && resultEvent.timestamp) {
+        var duration =
+          Date.parse(resultEvent.timestamp) - Date.parse(call.timestamp);
+        if (Number.isFinite(duration) && duration >= 0)
+          call.tool.durationMs = duration;
+      }
+      var resultEvents = session(resultEvent.sessionId).events,
+        resultIndex = resultEvents.indexOf(resultEvent);
+      if (resultIndex >= 0) resultEvents.splice(resultIndex, 1);
+    });
     var codexIndexTitles = new Map();
     indexRows.forEach(function (entry) {
       var raw = entry.raw,
@@ -1081,6 +1858,7 @@
         outputTokens: 0,
         cacheReadTokens: 0,
         cacheWriteTokens: 0,
+        reasoningTokens: 0,
       };
       s.events.forEach(function (e) {
         if (e.kind === "prompt") st.prompts++;
@@ -1139,6 +1917,22 @@
           st.cacheWriteTokens += number(u.cache_write_input_tokens);
         });
       });
+      if (s.platform === "OpenCode") {
+        var openCodeUsage = {
+          inputTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+        };
+        if (s._openCodeSessionTokens)
+          addOpenCodeTokens(openCodeUsage, s._openCodeSessionTokens);
+        else if (s._openCodeMessageTokens)
+          s._openCodeMessageTokens.forEach(function (tokens) {
+            addOpenCodeTokens(openCodeUsage, tokens);
+          });
+        addOpenCodeTokens(st, openCodeUsage);
+      }
       s.stats = st;
       s.events.forEach(function (e) {
         delete e._seq;
@@ -1148,6 +1942,8 @@
       delete s._titles;
       delete s._times;
       delete s._indexTitle;
+      delete s._openCodeSessionTokens;
+      delete s._openCodeMessageTokens;
     });
     return {
       sessions: Array.from(sessions.values()),
@@ -1157,6 +1953,7 @@
   }
   return {
     parseJSONL: parseJSONL,
+    parseJSON: parseJSON,
     parseMemory: parseMemory,
     buildWorkspace: buildWorkspace,
   };
